@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 
-import os
 import json
-import jms_storage
 
 from smtplib import SMTPSenderRefused
 from rest_framework import generics
@@ -12,18 +10,16 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils.translation import ugettext_lazy as _
 
-from .models import Setting
 from .utils import (
     LDAPServerUtil, LDAPCacheUtil, LDAPImportUtil, LDAPSyncUtil,
-    LDAP_USE_CACHE_FLAGS
-
+    LDAP_USE_CACHE_FLAGS, LDAPTestUtil,
 )
 from .tasks import sync_ldap_user_task
 from common.permissions import IsOrgAdmin, IsSuperUser
 from common.utils import get_logger
 from .serializers import (
-    MailTestSerializer, LDAPTestSerializer, LDAPUserSerializer,
-    PublicSettingSerializer,
+    MailTestSerializer, LDAPTestConfigSerializer, LDAPUserSerializer,
+    PublicSettingSerializer, LDAPTestLoginSerializer,
 )
 from users.models import User
 
@@ -70,10 +66,18 @@ class MailTestingAPI(APIView):
             return Response({"error": str(serializer.errors)}, status=401)
 
 
-class LDAPTestingAPI(APIView):
+class LDAPTestingConfigAPI(APIView):
     permission_classes = (IsSuperUser,)
-    serializer_class = LDAPTestSerializer
-    success_message = _("Test ldap success")
+    serializer_class = LDAPTestConfigSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        if not serializer.is_valid():
+            return Response({"error": str(serializer.errors)}, status=401)
+        config = self.get_ldap_config(serializer)
+        ok, msg = LDAPTestUtil(config).test_config()
+        status = 200 if ok else 401
+        return Response(msg, status=status)
 
     @staticmethod
     def get_ldap_config(serializer):
@@ -81,39 +85,36 @@ class LDAPTestingAPI(APIView):
         bind_dn = serializer.validated_data["AUTH_LDAP_BIND_DN"]
         password = serializer.validated_data["AUTH_LDAP_BIND_PASSWORD"]
         use_ssl = serializer.validated_data.get("AUTH_LDAP_START_TLS", False)
-        search_ougroup = serializer.validated_data["AUTH_LDAP_SEARCH_OU"]
+        search_ou = serializer.validated_data["AUTH_LDAP_SEARCH_OU"]
         search_filter = serializer.validated_data["AUTH_LDAP_SEARCH_FILTER"]
         attr_map = serializer.validated_data["AUTH_LDAP_USER_ATTR_MAP"]
+        auth_ldap = serializer.validated_data.get('AUTH_LDAP', False)
         config = {
             'server_uri': server_uri,
             'bind_dn': bind_dn,
             'password': password,
             'use_ssl': use_ssl,
-            'search_ougroup': search_ougroup,
+            'search_ou': search_ou,
             'search_filter': search_filter,
-            'attr_map': json.loads(attr_map),
+            'attr_map': attr_map,
+            'auth_ldap': auth_ldap
         }
         return config
+
+
+class LDAPTestingLoginAPI(APIView):
+    permission_classes = (IsSuperUser,)
+    serializer_class = LDAPTestLoginSerializer
 
     def post(self, request):
         serializer = self.serializer_class(data=request.data)
         if not serializer.is_valid():
             return Response({"error": str(serializer.errors)}, status=401)
-
-        attr_map = serializer.validated_data["AUTH_LDAP_USER_ATTR_MAP"]
-        try:
-            json.loads(attr_map)
-        except json.JSONDecodeError:
-            return Response({"error": _("LDAP attr map not valid")}, status=401)
-
-        config = self.get_ldap_config(serializer)
-        util = LDAPServerUtil(config=config)
-        try:
-            users = util.search()
-        except Exception as e:
-            return Response({"error": str(e)}, status=401)
-
-        return Response({"msg": _("Match {} s users").format(len(users))})
+        username = serializer.validated_data['username']
+        password = serializer.validated_data['password']
+        ok, msg = LDAPTestUtil().test_login(username, password)
+        status = 200 if ok else 401
+        return Response(msg, status=status)
 
 
 class LDAPUserListApi(generics.ListAPIView):
@@ -245,96 +246,15 @@ class LDAPCacheRefreshAPI(generics.RetrieveAPIView):
         return Response(data={'msg': 'success'})
 
 
-class ReplayStorageCreateAPI(APIView):
-    permission_classes = (IsSuperUser,)
-
-    def post(self, request):
-        storage_data = request.data
-
-        if storage_data.get('TYPE') == 'ceph':
-            port = storage_data.get('PORT')
-            if port.isdigit():
-                storage_data['PORT'] = int(storage_data.get('PORT'))
-
-        storage_name = storage_data.pop('NAME')
-        data = {storage_name: storage_data}
-
-        if not self.is_valid(storage_data):
-            return Response({
-                "error": _("Error: Account invalid (Please make sure the "
-                           "information such as Access key or Secret key is correct)")},
-                status=401
-            )
-
-        Setting.save_storage('TERMINAL_REPLAY_STORAGE', data)
-        return Response({"msg": _('Create succeed')}, status=200)
-
-    @staticmethod
-    def is_valid(storage_data):
-        if storage_data.get('TYPE') == 'server':
-            return True
-        storage = jms_storage.get_object_storage(storage_data)
-        target = 'tests.py'
-        src = os.path.join(settings.BASE_DIR, 'common', target)
-        return storage.is_valid(src, target)
-
-
-class ReplayStorageDeleteAPI(APIView):
-    permission_classes = (IsSuperUser,)
-
-    def post(self, request):
-        storage_name = str(request.data.get('name'))
-        Setting.delete_storage('TERMINAL_REPLAY_STORAGE', storage_name)
-        return Response({"msg": _('Delete succeed')}, status=200)
-
-
-class CommandStorageCreateAPI(APIView):
-    permission_classes = (IsSuperUser,)
-
-    def post(self, request):
-        storage_data = request.data
-        storage_name = storage_data.pop('NAME')
-        data = {storage_name: storage_data}
-        if not self.is_valid(storage_data):
-            return Response(
-                {"error": _("Error: Account invalid (Please make sure the "
-                            "information such as Access key or Secret key is correct)")},
-                status=401
-            )
-
-        Setting.save_storage('TERMINAL_COMMAND_STORAGE', data)
-        return Response({"msg": _('Create succeed')}, status=200)
-
-    @staticmethod
-    def is_valid(storage_data):
-        if storage_data.get('TYPE') == 'server':
-            return True
-        try:
-            storage = jms_storage.get_log_storage(storage_data)
-        except Exception:
-            return False
-
-        return storage.ping()
-
-
-class CommandStorageDeleteAPI(APIView):
-    permission_classes = (IsSuperUser,)
-
-    def post(self, request):
-        storage_name = str(request.data.get('name'))
-        Setting.delete_storage('TERMINAL_COMMAND_STORAGE', storage_name)
-        return Response({"msg": _('Delete succeed')}, status=200)
-
-
 class PublicSettingApi(generics.RetrieveAPIView):
     permission_classes = ()
     serializer_class = PublicSettingSerializer
 
     def get_object(self):
-        c = settings.CONFIG
         instance = {
             "data": {
-                "WINDOWS_SKIP_ALL_MANUAL_PASSWORD": c.WINDOWS_SKIP_ALL_MANUAL_PASSWORD
+                "WINDOWS_SKIP_ALL_MANUAL_PASSWORD": settings.WINDOWS_SKIP_ALL_MANUAL_PASSWORD,
+                "SECURITY_MAX_IDLE_TIME": settings.SECURITY_MAX_IDLE_TIME,
             }
         }
         return instance

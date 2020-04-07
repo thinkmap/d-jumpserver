@@ -24,7 +24,7 @@ from ..signals import post_user_create
 
 logger = get_logger(__name__)
 __all__ = [
-    'UserViewSet', 'UserChangePasswordApi', 'UserUpdateGroupApi',
+    'UserViewSet', 'UserChangePasswordApi',
     'UserResetPasswordApi', 'UserResetPKApi', 'UserUpdatePKApi',
     'UserUnblockPKApi', 'UserProfileApi', 'UserResetOTPApi',
 ]
@@ -39,7 +39,10 @@ class UserQuerysetMixin:
 class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
     filter_fields = ('username', 'email', 'name', 'id')
     search_fields = filter_fields
-    serializer_class = serializers.UserSerializer
+    serializer_classes = {
+        'default': serializers.UserSerializer,
+        'display': serializers.UserDisplaySerializer
+    }
     permission_classes = (IsOrgAdmin, CanUpdateDeleteUser)
 
     def get_queryset(self):
@@ -65,6 +68,12 @@ class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
         if self.request.query_params.get('all'):
             self.permission_classes = (IsSuperUser,)
         return super().get_permissions()
+
+    def perform_destroy(self, instance):
+        if current_org.is_real():
+            instance.remove()
+        else:
+            return super().perform_destroy(instance)
 
     def perform_bulk_destroy(self, objects):
         for obj in objects:
@@ -92,11 +101,6 @@ class UserChangePasswordApi(UserQuerysetMixin, generics.RetrieveUpdateAPIView):
         user.save()
 
 
-class UserUpdateGroupApi(UserQuerysetMixin, generics.RetrieveUpdateAPIView):
-    serializer_class = serializers.UserUpdateGroupSerializer
-    permission_classes = (IsOrgAdmin,)
-
-
 class UserResetPasswordApi(UserQuerysetMixin, generics.UpdateAPIView):
     queryset = User.objects.all()
     serializer_class = serializers.UserSerializer
@@ -119,7 +123,7 @@ class UserResetPKApi(UserQuerysetMixin, generics.UpdateAPIView):
     def perform_update(self, serializer):
         from ..utils import send_reset_ssh_key_mail
         user = self.get_object()
-        user.is_public_key_valid = False
+        user.public_key = None
         user.save()
         send_reset_ssh_key_mail(user)
 
@@ -172,8 +176,7 @@ class UserResetOTPApi(UserQuerysetMixin, generics.RetrieveAPIView):
         if user == request.user:
             msg = _("Could not reset self otp, use profile reset instead")
             return Response({"error": msg}, status=401)
-        if user.otp_enabled and user.otp_secret_key:
-            user.otp_secret_key = ''
+        if user.mfa_enabled:
+            user.reset_mfa()
             user.save()
-            logout(request)
         return Response({"msg": "success"})

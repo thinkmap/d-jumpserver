@@ -1,63 +1,43 @@
 # -*- coding: utf-8 -*-
 #
 from django.utils.translation import ugettext_lazy as _
-
 from rest_framework import serializers
 
 from common.utils import validate_ssh_public_key
 from common.mixins import BulkSerializerMixin
 from common.serializers import AdaptedBulkListSerializer
 from common.permissions import CanUpdateDeleteUser
-from ..models import User, UserGroup
+from ..models import User
 
 
 __all__ = [
-    'UserSerializer', 'UserPKUpdateSerializer', 'UserUpdateGroupSerializer',
+    'UserSerializer', 'UserPKUpdateSerializer',
     'ChangeUserPasswordSerializer', 'ResetOTPSerializer',
+    'UserProfileSerializer', 'UserDisplaySerializer',
 ]
 
 
 class UserSerializer(BulkSerializerMixin, serializers.ModelSerializer):
-
-    can_update = serializers.SerializerMethodField()
-    can_delete = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         list_serializer_class = AdaptedBulkListSerializer
         fields = [
             'id', 'name', 'username', 'password', 'email', 'public_key',
-            'groups',  'groups_display',
-            'role', 'role_display',  'wechat', 'phone', 'otp_level',
-            'comment', 'source', 'source_display', 'is_valid', 'is_expired',
+            'groups', 'role', 'wechat', 'phone', 'mfa_level',
+            'comment', 'source', 'is_valid', 'is_expired',
             'is_active', 'created_by', 'is_first_login',
             'date_password_last_updated', 'date_expired', 'avatar_url',
-            'can_update', 'can_delete',
         ]
         extra_kwargs = {
             'password': {'write_only': True, 'required': False, 'allow_null': True, 'allow_blank': True},
             'public_key': {'write_only': True},
-            'groups_display': {'label': _('Groups name')},
-            'source_display': {'label': _('Source name')},
             'is_first_login': {'label': _('Is first login'), 'read_only': True},
-            'role_display': {'label': _('Role name')},
             'is_valid': {'label': _('Is valid')},
             'is_expired': {'label': _('Is expired')},
             'avatar_url': {'label': _('Avatar url')},
             'created_by': {'read_only': True, 'allow_blank': True},
-            'can_update': {'read_only': True},
-            'can_delete': {'read_only': True},
         }
-
-    def get_can_update(self, obj):
-        return CanUpdateDeleteUser.has_update_object_permission(
-            self.context['request'], self.context['view'], obj
-        )
-
-    def get_can_delete(self, obj):
-        return CanUpdateDeleteUser.has_delete_object_permission(
-            self.context['request'], self.context['view'], obj
-        )
 
     def validate_role(self, value):
         request = self.context.get('request')
@@ -94,9 +74,50 @@ class UserSerializer(BulkSerializerMixin, serializers.ModelSerializer):
             attrs['password_raw'] = password
         return attrs
 
+    @staticmethod
+    def clean_auth_fields(attrs):
+        for field in ('password', 'public_key'):
+            value = attrs.get(field)
+            if not value:
+                attrs.pop(field, None)
+        return attrs
+
     def validate(self, attrs):
         attrs = self.change_password_to_raw(attrs)
+        attrs = self.clean_auth_fields(attrs)
         return attrs
+
+
+class UserDisplaySerializer(UserSerializer):
+    can_update = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            'groups_display', 'role_display', 'source_display',
+            'can_update', 'can_delete',
+        ]
+
+    def get_can_update(self, obj):
+        return CanUpdateDeleteUser.has_update_object_permission(
+            self.context['request'], self.context['view'], obj
+        )
+
+    def get_can_delete(self, obj):
+        return CanUpdateDeleteUser.has_delete_object_permission(
+            self.context['request'], self.context['view'], obj
+        )
+
+    def get_extra_kwargs(self):
+        kwargs = super().get_extra_kwargs()
+        kwargs.update({
+            'can_update': {'read_only': True},
+            'can_delete': {'read_only': True},
+            'groups_display': {'label': _('Groups name')},
+            'source_display': {'label': _('Source name')},
+            'role_display': {'label': _('Role name')},
+        })
+        return kwargs
 
 
 class UserPKUpdateSerializer(serializers.ModelSerializer):
@@ -111,16 +132,6 @@ class UserPKUpdateSerializer(serializers.ModelSerializer):
         return value
 
 
-class UserUpdateGroupSerializer(serializers.ModelSerializer):
-    groups = serializers.PrimaryKeyRelatedField(
-        many=True, queryset=UserGroup.objects
-    )
-
-    class Meta:
-        model = User
-        fields = ['id', 'groups']
-
-
 class ChangeUserPasswordSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -130,3 +141,17 @@ class ChangeUserPasswordSerializer(serializers.ModelSerializer):
 
 class ResetOTPSerializer(serializers.Serializer):
     msg = serializers.CharField(read_only=True)
+
+    def create(self, validated_data):
+        pass
+
+    def update(self, instance, validated_data):
+        pass
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'name', 'role', 'email'
+        ]

@@ -11,18 +11,18 @@ from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AbstractUser
 from django.core.cache import cache
 from django.db import models
+
 from django.utils.translation import ugettext_lazy as _
 from django.utils import timezone
 from django.shortcuts import reverse
 
 from orgs.utils import current_org
-from common.utils import get_signer, date_expired_default, get_logger
+from common.utils import signer, date_expired_default, get_logger, lazyproperty
 from common import fields
+from ..signals import post_user_change_password
 
 
 __all__ = ['User']
-
-signer = get_signer()
 
 logger = get_logger(__file__)
 
@@ -42,14 +42,10 @@ class AuthMixin:
         self.set_password(password_raw_)
 
     def set_password(self, raw_password):
-        self._set_password = True
         if self.can_update_password():
             self.date_password_last_updated = timezone.now()
+            post_user_change_password.send(self.__class__, user=self)
             super().set_password(raw_password)
-        else:
-            error = _("User auth from {}, go there change password").format(
-                self.source)
-            raise PermissionError(error)
 
     def can_update_password(self):
         return self.is_local
@@ -59,10 +55,6 @@ class AuthMixin:
 
     def can_use_ssh_key_login(self):
         return settings.TERMINAL_PUBLIC_KEY_AUTH
-
-    def check_otp(self, code):
-        from ..utils import check_otp_code
-        return check_otp_code(self.otp_secret_key, code)
 
     def is_public_key_valid(self):
         """
@@ -114,6 +106,30 @@ class AuthMixin:
         if self.is_local and 0 <= self.password_expired_remain_days < 5:
             return True
         return False
+
+    def get_login_confirm_setting(self):
+        if hasattr(self, 'login_confirm_setting'):
+            s = self.login_confirm_setting
+            if s.reviewers.all().count() and s.is_active:
+                return s
+        return False
+
+    @staticmethod
+    def get_public_key_body(key):
+        for i in key.split():
+            if len(i) > 256:
+                return i
+        return key
+
+    def check_public_key(self, key):
+        if not self.public_key:
+            return False
+        key = self.get_public_key_body(key)
+        key_saved = self.get_public_key_body(self.public_key)
+        if key == key_saved:
+            return True
+        else:
+            return False
 
 
 class RoleMixin:
@@ -175,49 +191,53 @@ class RoleMixin:
     def is_app(self):
         return self.role == 'App'
 
-    @property
+    @lazyproperty
     def user_orgs(self):
         from orgs.models import Organization
         return Organization.get_user_user_orgs(self)
 
-    @property
+    @lazyproperty
     def admin_orgs(self):
         from orgs.models import Organization
         return Organization.get_user_admin_orgs(self)
 
-    @property
+    @lazyproperty
     def audit_orgs(self):
         from orgs.models import Organization
         return Organization.get_user_audit_orgs(self)
 
-    @property
+    @lazyproperty
     def admin_or_audit_orgs(self):
         from orgs.models import Organization
         return Organization.get_user_admin_or_audit_orgs(self)
 
-    @property
+    @lazyproperty
     def is_org_admin(self):
         if self.is_superuser or self.related_admin_orgs.exists():
             return True
         else:
             return False
 
-    @property
+    @lazyproperty
     def is_org_auditor(self):
         if self.is_super_auditor or self.related_audit_orgs.exists():
             return True
         else:
             return False
 
-    @property
+    @lazyproperty
     def can_admin_current_org(self):
         return current_org.can_admin_by(self)
 
-    @property
+    @lazyproperty
     def can_audit_current_org(self):
         return current_org.can_audit_by(self)
 
-    @property
+    @lazyproperty
+    def can_user_current_org(self):
+        return current_org.can_user_by(self)
+
+    @lazyproperty
     def can_admin_or_audit_current_org(self):
         return self.can_admin_current_org or self.can_audit_current_org
 
@@ -241,6 +261,16 @@ class RoleMixin:
         )
         access_key = app.create_access_key()
         return app, access_key
+
+    def remove(self):
+        if not current_org.is_real():
+            return
+        if self.can_user_current_org:
+            current_org.users.remove(self)
+        if self.can_admin_current_org:
+            current_org.admins.remove(self)
+        if self.can_audit_current_org:
+            current_org.auditors.remove(self)
 
 
 class TokenMixin:
@@ -324,34 +354,69 @@ class TokenMixin:
 
 
 class MFAMixin:
-    otp_level = 0
+    mfa_level = 0
     otp_secret_key = ''
-    OTP_LEVEL_CHOICES = (
+    MFA_LEVEL_CHOICES = (
         (0, _('Disable')),
         (1, _('Enable')),
         (2, _("Force enable")),
     )
 
     @property
-    def otp_enabled(self):
-        return self.otp_force_enabled or self.otp_level > 0
+    def mfa_enabled(self):
+        return self.mfa_force_enabled or self.mfa_level > 0
 
     @property
-    def otp_force_enabled(self):
+    def mfa_force_enabled(self):
         if settings.SECURITY_MFA_AUTH:
             return True
-        return self.otp_level == 2
+        return self.mfa_level == 2
 
-    def enable_otp(self):
-        if not self.otp_level == 2:
-            self.otp_level = 1
+    def enable_mfa(self):
+        if not self.mfa_level == 2:
+            self.mfa_level = 1
 
-    def force_enable_otp(self):
-        self.otp_level = 2
+    def force_enable_mfa(self):
+        self.mfa_level = 2
 
-    def disable_otp(self):
-        self.otp_level = 0
+    def disable_mfa(self):
+        self.mfa_level = 0
         self.otp_secret_key = None
+
+    def reset_mfa(self):
+        if self.mfa_is_otp():
+            self.otp_secret_key = ''
+
+    @staticmethod
+    def mfa_is_otp():
+        if settings.OTP_IN_RADIUS:
+            return False
+        return True
+
+    def check_radius(self, code):
+        from authentication.backends.radius import RadiusBackend
+        backend = RadiusBackend()
+        user = backend.authenticate(None, username=self.username, password=code)
+        if user:
+            return True
+        return False
+
+    def check_otp(self, code):
+        from ..utils import check_otp_code
+        return check_otp_code(self.otp_secret_key, code)
+
+    def check_mfa(self, code):
+        if settings.OTP_IN_RADIUS:
+            return self.check_radius(code)
+        else:
+            return self.check_otp(code)
+
+    def mfa_enabled_but_not_set(self):
+        if not self.mfa_enabled:
+            return False, None
+        if self.mfa_is_otp() and not self.otp_secret_key:
+            return True, reverse('users:user-otp-enable-start')
+        return False, None
 
 
 class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
@@ -359,11 +424,13 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
     SOURCE_LDAP = 'ldap'
     SOURCE_OPENID = 'openid'
     SOURCE_RADIUS = 'radius'
+    SOURCE_CAS = 'cas'
     SOURCE_CHOICES = (
-        (SOURCE_LOCAL, 'Local'),
+        (SOURCE_LOCAL, _('Local')),
         (SOURCE_LDAP, 'LDAP/AD'),
         (SOURCE_OPENID, 'OpenID'),
         (SOURCE_RADIUS, 'Radius'),
+        (SOURCE_CAS, 'CAS'),
     )
 
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
@@ -391,8 +458,8 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
     phone = models.CharField(
         max_length=20, blank=True, null=True, verbose_name=_('Phone')
     )
-    otp_level = models.SmallIntegerField(
-        default=0, choices=MFAMixin.OTP_LEVEL_CHOICES, verbose_name=_('MFA')
+    mfa_level = models.SmallIntegerField(
+        default=0, choices=MFAMixin.MFA_LEVEL_CHOICES, verbose_name=_('MFA')
     )
     otp_secret_key = fields.EncryptCharField(max_length=128, blank=True, null=True)
     # Todo: Auto generate key, let user download
@@ -467,9 +534,17 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
     def is_local(self):
         return self.source == self.SOURCE_LOCAL
 
-    def save(self, *args, **kwargs):
+    def set_unprovide_attr_if_need(self):
         if not self.name:
             self.name = self.username
+        if not self.email or '@' not in self.email:
+            email = '{}@{}'.format(self.username, settings.EMAIL_SUFFIX)
+            if '@' in self.username:
+                email = self.username
+            self.email = email
+
+    def save(self, *args, **kwargs):
+        self.set_unprovide_attr_if_need()
         if self.username == 'admin':
             self.role = 'Admin'
             self.is_active = True
@@ -479,6 +554,14 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         if user_group in self.groups.all():
             return True
         return False
+
+    def set_avatar(self, f):
+        self.avatar.save(self.username, f)
+
+    @classmethod
+    def get_avatar_url(cls, username):
+        user_default = settings.STATIC_URL + "img/avatar/user.png"
+        return user_default
 
     def avatar_url(self):
         admin_default = settings.STATIC_URL + "img/avatar/admin.png"
@@ -512,6 +595,11 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
                    created_by=_('System'))
         user.save()
         user.groups.add(UserGroup.initial())
+
+    def can_send_created_mail(self):
+        if self.email and self.source == self.SOURCE_LOCAL:
+            return True
+        return False
 
     @classmethod
     def generate_fake(cls, count=100):

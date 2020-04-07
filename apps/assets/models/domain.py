@@ -10,7 +10,7 @@ from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
 from orgs.mixins.models import OrgModelMixin
-from .base import AssetUser
+from .base import BaseUser
 
 __all__ = ['Domain', 'Gateway']
 
@@ -39,7 +39,7 @@ class Domain(OrgModelMixin):
         return random.choice(self.gateways)
 
 
-class Gateway(AssetUser):
+class Gateway(BaseUser):
     PROTOCOL_SSH = 'ssh'
     PROTOCOL_RDP = 'rdp'
     PROTOCOL_CHOICES = (
@@ -63,7 +63,7 @@ class Gateway(AssetUser):
     def test_connective(self, local_port=None):
         if local_port is None:
             local_port = self.port
-        if not re.match(r'\w+$', self.password):
+        if self.password and not re.match(r'\w+$', self.password):
             return False, _("Password should not contain special characters")
 
         client = paramiko.SSHClient()

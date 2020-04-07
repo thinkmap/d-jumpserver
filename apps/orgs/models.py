@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
-from common.utils import is_uuid
+from common.utils import is_uuid, lazyproperty
 
 
 class Organization(models.Model):
@@ -72,7 +72,8 @@ class Organization(models.Model):
             org = cls.default() if default else None
         return org
 
-    def get_org_users(self):
+    @lazyproperty
+    def org_users(self):
         from users.models import User
         if self.is_real():
             return self.users.all()
@@ -81,17 +82,36 @@ class Organization(models.Model):
             users = users.filter(related_user_orgs__isnull=True)
         return users
 
-    def get_org_admins(self):
+    def get_org_users(self):
+        return self.org_users
+
+    @lazyproperty
+    def org_admins(self):
         from users.models import User
         if self.is_real():
             return self.admins.all()
         return User.objects.filter(role=User.ROLE_ADMIN)
 
-    def get_org_auditors(self):
+    def get_org_admins(self):
+        return self.org_admins
+
+    def org_id(self):
+        if self.is_real():
+            return self.id
+        elif self.is_root():
+            return self.ROOT_ID
+        else:
+            return ''
+
+    @lazyproperty
+    def org_auditors(self):
         from users.models import User
         if self.is_real():
             return self.auditors.all()
         return User.objects.filter(role=User.ROLE_AUDITOR)
+
+    def get_org_auditors(self):
+        return self.org_auditors
 
     def get_org_members(self, exclude=()):
         from users.models import User
@@ -115,6 +135,11 @@ class Organization(models.Model):
         if user.is_super_auditor:
             return True
         if self.get_org_auditors().filter(id=user.id):
+            return True
+        return False
+
+    def can_user_by(self, user):
+        if self.get_org_users().filter(id=user.id):
             return True
         return False
 
@@ -184,3 +209,9 @@ class Organization(models.Model):
     def change_to(self):
         from .utils import set_current_org
         set_current_org(self)
+
+    @classmethod
+    def all_orgs(cls):
+        orgs = list(cls.objects.all())
+        orgs.append(cls.default())
+        return orgs
