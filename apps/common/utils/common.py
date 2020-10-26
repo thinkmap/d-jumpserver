@@ -11,6 +11,8 @@ import time
 import ipaddress
 import psutil
 
+from .timezone import dt_formater
+
 
 UUID_PATTERN = re.compile(r'\w{8}(-\w{4}){3}-\w{12}')
 ipip_db = None
@@ -160,6 +162,11 @@ def get_request_ip_or_data(request):
         ip = request.data.get('remote_addr', '')
     ip = ip or get_request_ip(request)
     return ip
+
+
+def get_request_user_agent(request):
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
+    return user_agent
 
 
 def validate_ip(ip):

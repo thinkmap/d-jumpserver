@@ -2,30 +2,36 @@ import uuid
 import logging
 from functools import reduce
 
-from django.db import models
-from django.db.models import Q
 from django.utils.translation import ugettext_lazy as _
 
+from common.db import models
+from common.utils import lazyproperty
 from orgs.models import Organization
 from orgs.utils import get_current_org
-from assets.models import Asset, SystemUser, Node
+from assets.models import Asset, SystemUser, Node, FamilyMixin
 
 from .base import BasePermission
 
 
 __all__ = [
-    'AssetPermission', 'Action',
+    'AssetPermission', 'Action', 'UserGrantedMappingNode', 'RebuildUserTreeTask',
 ]
+
+# 使用场景
 logger = logging.getLogger(__name__)
 
 
 class Action:
     NONE = 0
-    CONNECT = 0b00000001
-    UPLOAD = 0b00000010
-    DOWNLOAD = 0b00000100
+
+    CONNECT = 0b1
+    UPLOAD = 0b1 << 1
+    DOWNLOAD = 0b1 << 2
+    CLIPBOARD_COPY = 0b1 << 3
+    CLIPBOARD_PASTE = 0b1 << 4
+    ALL = 0xff
     UPDOWNLOAD = UPLOAD | DOWNLOAD
-    ALL = 0b11111111
+    CLIPBOARD_COPY_PASTE = CLIPBOARD_COPY | CLIPBOARD_PASTE
 
     DB_CHOICES = (
         (ALL, _('All')),
@@ -33,6 +39,9 @@ class Action:
         (UPLOAD, _('Upload file')),
         (DOWNLOAD, _('Download file')),
         (UPDOWNLOAD, _("Upload download")),
+        (CLIPBOARD_COPY, _('Clipboard copy')),
+        (CLIPBOARD_PASTE, _('Clipboard paste')),
+        (CLIPBOARD_COPY_PASTE, _('Clipboard copy paste'))
     )
 
     NAME_MAP = {
@@ -41,9 +50,12 @@ class Action:
         UPLOAD: "upload_file",
         DOWNLOAD: "download_file",
         UPDOWNLOAD: "updownload",
+        CLIPBOARD_COPY: 'clipboard_copy',
+        CLIPBOARD_PASTE: 'clipboard_paste',
+        CLIPBOARD_COPY_PASTE: 'clipboard_copy_paste'
     }
 
-    NAME_MAP_REVERSE = dict({v: k for k, v in NAME_MAP.items()})
+    NAME_MAP_REVERSE = {v: k for k, v in NAME_MAP.items()}
     CHOICES = []
     for i, j in DB_CHOICES:
         CHOICES.append((NAME_MAP[i], j))
@@ -87,6 +99,26 @@ class AssetPermission(BasePermission):
         verbose_name = _("Asset permission")
         ordering = ('name',)
 
+    @lazyproperty
+    def users_amount(self):
+        return self.users.count()
+
+    @lazyproperty
+    def user_groups_amount(self):
+        return self.user_groups.count()
+
+    @lazyproperty
+    def assets_amount(self):
+        return self.assets.count()
+
+    @lazyproperty
+    def nodes_amount(self):
+        return self.nodes.count()
+
+    @lazyproperty
+    def system_users_amount(self):
+        return self.system_users.count()
+
     @classmethod
     def get_queryset_with_prefetch(cls):
         return cls.objects.all().valid().prefetch_related(
@@ -104,51 +136,34 @@ class AssetPermission(BasePermission):
         assets = Asset.objects.filter(id__in=assets_ids)
         return assets
 
+
+
+class UserGrantedMappingNode(FamilyMixin, models.JMSBaseModel):
+    node = models.ForeignKey('assets.Node', default=None, on_delete=models.CASCADE,
+                             db_constraint=False, null=True, related_name='mapping_nodes')
+    key = models.CharField(max_length=64, verbose_name=_("Key"), db_index=True)  # '1:1:1:1'
+    user = models.ForeignKey('users.User', db_constraint=False, on_delete=models.CASCADE)
+    granted = models.BooleanField(default=False, db_index=True)
+    asset_granted = models.BooleanField(default=False, db_index=True)
+    parent_key = models.CharField(max_length=64, default='', verbose_name=_('Parent key'), db_index=True)  # '1:1:1:1'
+    assets_amount = models.IntegerField(default=0)
+
+    GRANTED_DIRECT = 1
+    GRANTED_INDIRECT = 2
+    GRANTED_NONE = 0
+
     @classmethod
-    def generate_fake(cls, count=100):
-        from ..hands import User, Node, SystemUser
-        import random
+    def get_node_granted_status(cls, key, user):
+        ancestor_keys = Node.get_node_ancestor_keys(key, with_self=True)
+        has_granted = UserGrantedMappingNode.objects.filter(
+            key__in=ancestor_keys, user=user
+        ).values_list('granted', flat=True)
+        if not has_granted:
+            return cls.GRANTED_NONE
+        if any(list(has_granted)):
+            return cls.GRANTED_DIRECT
+        return cls.GRANTED_INDIRECT
 
-        org = get_current_org()
-        if not org or not org.is_real():
-            Organization.default().change_to()
 
-        nodes = list(Node.objects.all())
-        assets = list(Asset.objects.all())
-        system_users = list(SystemUser.objects.all())
-        users = User.objects.filter(username='admin')
-
-        for i in range(count):
-            name = "fake_perm_to_admin_{}".format(str(uuid.uuid4())[:6])
-            perm = cls(name=name)
-            try:
-                perm.save()
-                perm.users.set(users)
-                if system_users and len(system_users) > 3:
-                    _system_users = random.sample(system_users, 3)
-                elif system_users:
-                    _system_users = [system_users[0]]
-                else:
-                    _system_users = []
-                perm.system_users.set(_system_users)
-
-                if nodes and len(nodes) > 3:
-                    _nodes = random.sample(nodes, 3)
-                else:
-                    _nodes = [Node.default_node()]
-                perm.nodes.set(_nodes)
-
-                if assets and len(assets) > 3:
-                    _assets = random.sample(assets, 3)
-                elif assets:
-                    _assets = [assets[0]]
-                else:
-                    _assets = []
-                perm.assets.set(_assets)
-
-                logger.debug('Generate fake perm: %s' % perm.name)
-
-            except Exception as e:
-                print('Error continue')
-                continue
-
+class RebuildUserTreeTask(models.JMSBaseModel):
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE, verbose_name=_('User'))

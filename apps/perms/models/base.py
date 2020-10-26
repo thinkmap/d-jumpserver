@@ -8,12 +8,12 @@ from django.db.models import Q
 from django.utils import timezone
 from orgs.mixins.models import OrgModelMixin
 
-from common.utils import date_expired_default
+from common.utils import date_expired_default, lazyproperty
 from orgs.mixins.models import OrgManager
 
 
 __all__ = [
-    'BasePermission',
+    'BasePermission', 'BasePermissionQuerySet'
 ]
 
 
@@ -46,8 +46,8 @@ class BasePermissionManager(OrgManager):
 class BasePermission(OrgModelMixin):
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     name = models.CharField(max_length=128, verbose_name=_('Name'))
-    users = models.ManyToManyField('users.User', blank=True, verbose_name=_("User"))
-    user_groups = models.ManyToManyField('users.UserGroup', blank=True, verbose_name=_("User group"))
+    users = models.ManyToManyField('users.User', blank=True, verbose_name=_("User"), related_name='%(class)ss')
+    user_groups = models.ManyToManyField('users.UserGroup', blank=True, verbose_name=_("User group"), related_name='%(class)ss')
     is_active = models.BooleanField(default=True, verbose_name=_('Active'))
     date_start = models.DateTimeField(default=timezone.now, db_index=True, verbose_name=_("Date start"))
     date_expired = models.DateTimeField(default=date_expired_default, db_index=True, verbose_name=_('Date expired'))
@@ -79,6 +79,23 @@ class BasePermission(OrgModelMixin):
             return True
         return False
 
+    @property
+    def all_users(self):
+        from users.models import User
+
+        users_query = self._meta.get_field('users').related_query_name()
+        user_groups_query = self._meta.get_field('user_groups').related_query_name()
+
+        users_q = Q(**{
+            f'{users_query}': self
+        })
+
+        user_groups_q = Q(**{
+            f'groups__{user_groups_query}': self
+        })
+
+        return User.objects.filter(users_q | user_groups_q).distinct()
+
     def get_all_users(self):
         from users.models import User
         users_id = self.users.all().values_list('id', flat=True)
@@ -87,3 +104,11 @@ class BasePermission(OrgModelMixin):
             Q(id__in=users_id) | Q(groups__id__in=groups_id)
         ).distinct()
         return users
+
+    @lazyproperty
+    def users_amount(self):
+        return self.users.count()
+
+    @lazyproperty
+    def user_groups_amount(self):
+        return self.user_groups.count()

@@ -95,10 +95,8 @@ class PeriodTaskModelMixin(models.Model):
     @property
     def schedule(self):
         from django_celery_beat.models import PeriodicTask
-        try:
-            return PeriodicTask.objects.get(name=str(self))
-        except PeriodicTask.DoesNotExist:
-            return None
+        name = self.get_register_task()[0]
+        return PeriodicTask.objects.filter(name=name).first()
 
     class Meta:
         abstract = True
@@ -110,7 +108,7 @@ class PeriodTaskSerializerMixin(serializers.Serializer):
         max_length=128, allow_blank=True,
         allow_null=True, required=False, label=_('Regularly perform')
     )
-    interval = serializers.IntegerField(allow_null=True, required=False)
+    interval = serializers.IntegerField(allow_null=True, required=False, label=_('Interval'))
 
     INTERVAL_MAX = 65535
     INTERVAL_MIN = 1

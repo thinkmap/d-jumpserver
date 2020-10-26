@@ -2,9 +2,12 @@
 #
 from rest_framework import generics
 from django.db.models import F, Value
+from django.db.models import Q
 from django.db.models.functions import Concat
 from django.shortcuts import get_object_or_404
 
+from assets.models import Node, Asset
+from orgs.mixins.api import OrgRelationMixin
 from orgs.mixins.api import OrgBulkModelViewSet
 from orgs.utils import current_org
 from common.permissions import IsOrgAdmin
@@ -19,9 +22,9 @@ __all__ = [
 ]
 
 
-class RelationMixin(OrgBulkModelViewSet):
+class RelationMixin(OrgRelationMixin, OrgBulkModelViewSet):
     def get_queryset(self):
-        queryset = self.model.objects.all()
+        queryset = super().get_queryset()
         org_id = current_org.org_id()
         if org_id is not None:
             queryset = queryset.filter(assetpermission__org_id=org_id)
@@ -31,9 +34,9 @@ class RelationMixin(OrgBulkModelViewSet):
 
 class AssetPermissionUserRelationViewSet(RelationMixin):
     serializer_class = serializers.AssetPermissionUserRelationSerializer
-    model = models.AssetPermission.users.through
+    m2m_field = models.AssetPermission.users.field
     permission_classes = (IsOrgAdmin,)
-    filterset_fields = [
+    filter_fields = [
         'id', "user", "assetpermission",
     ]
     search_fields = ("user__name", "user__username", "assetpermission__name")
@@ -62,9 +65,9 @@ class AssetPermissionAllUserListApi(generics.ListAPIView):
 
 class AssetPermissionUserGroupRelationViewSet(RelationMixin):
     serializer_class = serializers.AssetPermissionUserGroupRelationSerializer
-    model = models.AssetPermission.user_groups.through
+    m2m_field = models.AssetPermission.user_groups.field
     permission_classes = (IsOrgAdmin,)
-    filterset_fields = [
+    filter_fields = [
         'id', "usergroup", "assetpermission"
     ]
     search_fields = ["usergroup__name", "assetpermission__name"]
@@ -78,9 +81,9 @@ class AssetPermissionUserGroupRelationViewSet(RelationMixin):
 
 class AssetPermissionAssetRelationViewSet(RelationMixin):
     serializer_class = serializers.AssetPermissionAssetRelationSerializer
-    model = models.AssetPermission.assets.through
+    m2m_field = models.AssetPermission.assets.field
     permission_classes = (IsOrgAdmin,)
-    filterset_fields = [
+    filter_fields = [
         'id', 'asset', 'assetpermission',
     ]
     search_fields = ["id", "asset__hostname", "asset__ip", "assetpermission__name"]
@@ -101,17 +104,22 @@ class AssetPermissionAllAssetListApi(generics.ListAPIView):
     def get_queryset(self):
         pk = self.kwargs.get("pk")
         perm = get_object_or_404(models.AssetPermission, pk=pk)
-        assets = perm.get_all_assets().only(
-            *self.serializer_class.Meta.only_fields
-        )
+
+        asset_q = Q(granted_by_permissions=perm)
+        granted_node_keys = Node.objects.filter(granted_by_permissions=perm).distinct().values_list('key', flat=True)
+        for key in granted_node_keys:
+            asset_q |= Q(nodes__key__startswith=f'{key}:')
+            asset_q |= Q(nodes__key=key)
+
+        assets = Asset.objects.filter(asset_q).only(*self.serializer_class.Meta.only_fields).distinct()
         return assets
 
 
 class AssetPermissionNodeRelationViewSet(RelationMixin):
     serializer_class = serializers.AssetPermissionNodeRelationSerializer
-    model = models.AssetPermission.nodes.through
+    m2m_field = models.AssetPermission.nodes.field
     permission_classes = (IsOrgAdmin,)
-    filterset_fields = [
+    filter_fields = [
         'id', 'node', 'assetpermission',
     ]
     search_fields = ["node__value", "assetpermission__name"]
@@ -125,9 +133,9 @@ class AssetPermissionNodeRelationViewSet(RelationMixin):
 
 class AssetPermissionSystemUserRelationViewSet(RelationMixin):
     serializer_class = serializers.AssetPermissionSystemUserRelationSerializer
-    model = models.AssetPermission.system_users.through
+    m2m_field = models.AssetPermission.system_users.field
     permission_classes = (IsOrgAdmin,)
-    filterset_fields = [
+    filter_fields = [
         'id', 'systemuser', 'assetpermission',
     ]
     search_fields = [

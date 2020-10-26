@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 from rest_framework import serializers
-from django.db.models import Prefetch, F
+from django.db.models import Prefetch, F, Count
 
 from django.utils.translation import ugettext_lazy as _
 
@@ -67,27 +67,43 @@ class AssetSerializer(BulkOrgResourceModelSerializer):
         slug_field='name', queryset=Platform.objects.all(), label=_("Platform")
     )
     protocols = ProtocolsField(label=_('Protocols'), required=False)
+    domain_display = serializers.ReadOnlyField(source='domain.name')
+    admin_user_display = serializers.ReadOnlyField(source='admin_user.name')
+
     """
     资产的数据结构
     """
     class Meta:
         model = Asset
-        list_serializer_class = AdaptedBulkListSerializer
-        fields = [
-            'id', 'ip', 'hostname', 'protocol', 'port',
-            'protocols', 'platform', 'is_active', 'public_ip', 'domain',
-            'admin_user', 'nodes', 'labels', 'number', 'vendor', 'model', 'sn',
-            'cpu_model', 'cpu_count', 'cpu_cores', 'cpu_vcpus', 'memory',
-            'disk_total', 'disk_info', 'os', 'os_version', 'os_arch',
-            'hostname_raw', 'comment', 'created_by', 'date_created',
-            'hardware_info',
+        fields_mini = ['id', 'hostname', 'ip']
+        fields_small = fields_mini + [
+            'protocol', 'port', 'protocols', 'is_active', 'public_ip',
+            'number', 'vendor', 'model', 'sn', 'cpu_model', 'cpu_count',
+            'cpu_cores', 'cpu_vcpus', 'memory', 'disk_total', 'disk_info',
+            'os', 'os_version', 'os_arch', 'hostname_raw', 'comment',
+            'created_by', 'date_created', 'hardware_info',
         ]
-        read_only_fields = (
+        fields_fk = [
+            'admin_user', 'admin_user_display', 'domain', 'domain_display', 'platform'
+        ]
+        fk_only_fields = {
+            'platform': ['name']
+        }
+        fields_m2m = [
+            'nodes', 'labels',
+        ]
+        annotates_fields = {
+            # 'admin_user_display': 'admin_user__name'
+        }
+        fields_as = list(annotates_fields.keys())
+        fields = fields_small + fields_fk + fields_m2m + fields_as
+        read_only_fields = [
             'vendor', 'model', 'sn', 'cpu_model', 'cpu_count',
             'cpu_cores', 'cpu_vcpus', 'memory', 'disk_total', 'disk_info',
             'os', 'os_version', 'os_arch', 'hostname_raw',
             'created_by', 'date_created',
-        )
+        ] + fields_as
+
         extra_kwargs = {
             'protocol': {'write_only': True},
             'port': {'write_only': True},
@@ -98,11 +114,8 @@ class AssetSerializer(BulkOrgResourceModelSerializer):
     @classmethod
     def setup_eager_loading(cls, queryset):
         """ Perform necessary eager loading of data. """
-        queryset = queryset.prefetch_related(
-            Prefetch('nodes', queryset=Node.objects.all().only('id')),
-            Prefetch('labels', queryset=Label.objects.all().only('id')),
-        ).select_related('admin_user', 'domain', 'platform') \
-         .annotate(platform_base=F('platform__base'))
+        queryset = queryset.select_related('admin_user', 'domain', 'platform')
+        queryset = queryset.prefetch_related('nodes', 'labels')
         return queryset
 
     def compatible_with_old_protocol(self, validated_data):
@@ -134,19 +147,13 @@ class AssetDisplaySerializer(AssetSerializer):
     connectivity = ConnectivitySerializer(read_only=True, label=_("Connectivity"))
 
     class Meta(AssetSerializer.Meta):
-        fields = [
-            'id', 'ip', 'hostname', 'protocol', 'port',
-            'protocols', 'is_active', 'public_ip',
-            'number', 'vendor', 'model', 'sn',
-            'cpu_model', 'cpu_count', 'cpu_cores', 'cpu_vcpus', 'memory',
-            'disk_total', 'disk_info', 'os', 'os_version', 'os_arch',
-            'hostname_raw', 'comment', 'created_by', 'date_created',
-            'hardware_info', 'connectivity',
+        fields = AssetSerializer.Meta.fields + [
+            'connectivity',
         ]
 
     @classmethod
     def setup_eager_loading(cls, queryset):
-        """ Perform necessary eager loading of data. """
+        queryset = super().setup_eager_loading(queryset)
         queryset = queryset\
             .annotate(admin_user_username=F('admin_user__username'))
         return queryset

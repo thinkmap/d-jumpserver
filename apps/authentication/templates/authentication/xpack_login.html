@@ -67,22 +67,30 @@
             </div>
             <div class="box-3">
                 <div style="background-color: white">
-                    <div style="margin-top: 30px;padding-top: 40px;padding-left: 20px;padding-right: 20px;height: 80px">
-                        <span style="font-size: 21px;font-weight:400;color: #151515;letter-spacing: 0;">{{ JMS_TITLE }}</span>
-                    </div>
+                    {% if form.challenge %}
+                        <div style="margin-top: 20px;padding-top: 30px;padding-left: 20px;padding-right: 20px;height: 60px">
+                    {% else %}
+                        <div style="margin-top: 20px;padding-top: 40px;padding-left: 20px;padding-right: 20px;height: 80px">
+                    {% endif %}
+                            <span style="font-size: 21px;font-weight:400;color: #151515;letter-spacing: 0;">{{ JMS_TITLE }}</span>
+                        </div>
                     <div style="font-size: 12px;color: #999999;letter-spacing: 0;line-height: 18px;margin-top: 18px">
                         {% trans 'Welcome back, please enter username and password to login' %}
                     </div>
-                    <div style="margin-bottom: 10px">
+                    <div style="margin-bottom: 0px">
                         <div>
                             <div class="col-md-1"></div>
-                            <div class="contact-form col-md-10" style="margin-top: 20px;height: 35px">
+                            <div class="contact-form col-md-10" style="margin-top: 0px;height: 35px">
                                 <form id="contact-form" action="" method="post" role="form" novalidate="novalidate">
                                     {% csrf_token %}
                                     {% if form.non_field_errors %}
-                                    <div style="height: 70px;color: red;line-height: 17px;">
-                                        <p class="red-fonts">{{ form.non_field_errors.as_text }}</p>
-                                    </div>
+                                        {% if form.challenge %}
+                                            <div style="height: 50px;color: red;line-height: 17px;">
+                                        {% else %}
+                                            <div style="height: 70px;color: red;line-height: 17px;">
+                                        {% endif %}
+                                            <p class="red-fonts">{{ form.non_field_errors.as_text }}</p>
+                                        </div>
                                     {% elif form.errors.captcha %}
                                         <p class="red-fonts">{% trans 'Captcha invalid' %}</p>
                                     {% else %}
@@ -98,21 +106,32 @@
                                         {% endif %}
                                     </div>
                                     <div class="form-group">
-                                        <input type="password" class="form-control" name="{{ form.password.html_name }}" placeholder="{% trans 'Password' %}" required="">
+                                        <input type="password" class="form-control" id="password" placeholder="{% trans 'Password' %}" required="">
+                                        <input id="password-hidden" type="text" style="display:none" name="{{ form.password.html_name }}">
                                         {% if form.errors.password %}
                                             <div class="help-block field-error">
                                                 <p class="red-fonts">{{ form.errors.password.as_text }}</p>
                                             </div>
                                         {% endif %}
                                     </div>
+                                    {% if form.challenge %}
+                                        <div class="form-group">
+                                            <input type="challenge" class="form-control" id="challenge" name="{{ form.challenge.html_name }}" placeholder="{% trans 'MFA code' %}" >
+                                            {% if form.errors.challenge %}
+                                                <div class="help-block field-error">
+                                                    <p class="red-fonts">{{ form.errors.challenge.as_text }}</p>
+                                                </div>
+                                            {% endif %}
+                                        </div>
+                                    {% endif %}
                                     <div class="form-group" style="height: 50px;margin-bottom: 0;font-size: 13px">
                                         {{ form.captcha }}
                                     </div>
                                     <div class="form-group" style="margin-top: 10px">
-                                        <button type="submit" class="btn btn-transparent">{% trans 'Login' %}</button>
+                                        <button type="submit" class="btn btn-transparent" onclick="doLogin();return false;">{% trans 'Login' %}</button>
                                     </div>
                                     <div style="text-align: center">
-                                        <a href="{% url 'users:forgot-password' %}">
+                                        <a id="forgot_password" href="#">
                                             <small>{% trans 'Forgot password' %}?</small>
                                         </a>
                                     </div>
@@ -125,6 +144,36 @@
             </div>
         </div>
     </div>
+    </div>
 
 </body>
+<script type="text/javascript" src="/static/js/plugins/jsencrypt/jsencrypt.min.js"></script>
+<script>
+    function encryptLoginPassword(password, rsaPublicKey){
+        var jsencrypt = new JSEncrypt(); //加密对象
+        jsencrypt.setPublicKey(rsaPublicKey); // 设置密钥
+        return jsencrypt.encrypt(password); //加密
+    }
+    function doLogin() {
+        //公钥加密
+        var rsaPublicKey = "{{ rsa_public_key }}"
+        var password =$('#password').val(); //明文密码
+        var passwordEncrypted = encryptLoginPassword(password, rsaPublicKey)
+        $('#password-hidden').val(passwordEncrypted); //返回给密码输入input
+        $('#contact-form').submit();//post提交
+    }
+
+    var authDB = '{{ AUTH_DB }}';
+    var forgotPasswordUrl = "{% url 'authentication:forgot-password' %}";
+    $(document).ready(function () {
+    }).on('click', '#forgot_password', function () {
+        if (authDB === 'True'){
+            window.open(forgotPasswordUrl, "_blank")
+        }
+        else{
+            alert("{% trans 'You are using another authentication server, please contact your administrator' %}")
+        }
+    })
+</script>
 </html>
+

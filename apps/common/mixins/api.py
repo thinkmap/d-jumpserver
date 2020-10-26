@@ -3,18 +3,21 @@
 import time
 from hashlib import md5
 from threading import Thread
+from collections import defaultdict
+from itertools import chain
 
+from django.db.models.signals import m2m_changed
 from django.core.cache import cache
 from django.http import JsonResponse
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
-from common.drf.filters import IDSpmFilter, CustomFilter
+from common.drf.filters import IDSpmFilter, CustomFilter, IDInFilter
 from ..utils import lazyproperty
 
 __all__ = [
-    "JSONResponseMixin", "CommonApiMixin",
-    "IDSpmFilterMixin", 'AsyncApiMixin',
+    'JSONResponseMixin', 'CommonApiMixin', 'AsyncApiMixin', 'RelationMixin',
+    'SerializerMixin2', 'QuerySetMixin', 'ExtraFilterFieldsMixin'
 ]
 
 
@@ -25,19 +28,11 @@ class JSONResponseMixin(object):
         return JsonResponse(context)
 
 
-class IDSpmFilterMixin:
-    def get_filter_backends(self):
-        backends = super().get_filter_backends()
-        backends.append(IDSpmFilter)
-        return backends
-
-
 class SerializerMixin:
     def get_serializer_class(self):
         serializer_class = None
-        if hasattr(self, 'serializer_classes') and \
-                isinstance(self.serializer_classes, dict):
-            if self.action == 'list' and self.request.query_params.get('draw'):
+        if hasattr(self, 'serializer_classes') and isinstance(self.serializer_classes, dict):
+            if self.action in ['list', 'metadata'] and self.request.query_params.get('draw'):
                 serializer_class = self.serializer_classes.get('display')
             if serializer_class is None:
                 serializer_class = self.serializer_classes.get(
@@ -49,7 +44,10 @@ class SerializerMixin:
 
 
 class ExtraFilterFieldsMixin:
-    default_added_filters = [CustomFilter, IDSpmFilter]
+    """
+    额外的 api filter
+    """
+    default_added_filters = [CustomFilter, IDSpmFilter, IDInFilter]
     filter_backends = api_settings.DEFAULT_FILTER_BACKENDS
     extra_filter_fields = []
     extra_filter_backends = []
@@ -57,9 +55,11 @@ class ExtraFilterFieldsMixin:
     def get_filter_backends(self):
         if self.filter_backends != self.__class__.filter_backends:
             return self.filter_backends
-        return list(self.filter_backends) + \
-               self.default_added_filters + \
-               list(self.extra_filter_backends)
+        backends = list(chain(
+            self.filter_backends,
+            self.default_added_filters,
+            self.extra_filter_backends))
+        return backends
 
     def filter_queryset(self, queryset):
         for backend in self.get_filter_backends():
@@ -67,11 +67,25 @@ class ExtraFilterFieldsMixin:
         return queryset
 
 
+class PaginatedResponseMixin:
+    def get_paginated_response_with_query_set(self, queryset):
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
 class CommonApiMixin(SerializerMixin, ExtraFilterFieldsMixin):
     pass
 
 
 class InterceptMixin:
+    """
+    Hack默认的dispatch, 让用户可以实现 self.do
+    """
     def dispatch(self, request, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
@@ -188,3 +202,91 @@ class AsyncApiMixin(InterceptMixin):
             data["error"] = str(e)
             data["status"] = "error"
             cache.set(key, data, 600)
+
+
+class RelationMixin:
+    m2m_field = None
+    from_field = None
+    to_field = None
+    to_model = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        assert self.m2m_field is not None, '''
+        `m2m_field` should not be `None`
+        '''
+
+        self.from_field = self.m2m_field.m2m_field_name()
+        self.to_field = self.m2m_field.m2m_reverse_field_name()
+        self.to_model = self.m2m_field.related_model
+        self.through = getattr(self.m2m_field.model, self.m2m_field.attname).through
+
+    def get_queryset(self):
+        # 注意，此处拦截了 `get_queryset` 没有 `super`
+        queryset = self.through.objects.all()
+        return queryset
+
+    def send_m2m_changed_signal(self, instances, action):
+        if not isinstance(instances, list):
+            instances = [instances]
+
+        from_to_mapper = defaultdict(list)
+
+        for i in instances:
+            to_id = getattr(i, self.to_field).id
+            # TODO 优化，不应该每次都查询数据库
+            from_obj = getattr(i, self.from_field)
+            from_to_mapper[from_obj].append(to_id)
+
+        for from_obj, to_ids in from_to_mapper.items():
+            m2m_changed.send(
+                sender=self.through, instance=from_obj, action=action,
+                reverse=False, model=self.to_model, pk_set=to_ids
+            )
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        self.send_m2m_changed_signal(instance, 'post_add')
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        self.send_m2m_changed_signal(instance, 'post_remove')
+
+
+class SerializerMixin2:
+    serializer_classes = {}
+
+    def get_serializer_class(self):
+        if self.serializer_classes:
+            serializer_class = self.serializer_classes.get(
+                self.action, self.serializer_classes.get('default')
+            )
+
+            if isinstance(serializer_class, dict):
+                serializer_class = serializer_class.get(
+                    self.request.method.lower, serializer_class.get('default')
+                )
+
+            assert serializer_class, '`serializer_classes` config error'
+            return serializer_class
+        return super().get_serializer_class()
+
+
+class QuerySetMixin:
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        serializer_class = self.get_serializer_class()
+        if serializer_class and hasattr(serializer_class, 'setup_eager_loading'):
+            queryset = serializer_class.setup_eager_loading(queryset)
+
+        return queryset
+
+
+class AllowBulkDestoryMixin:
+    def allow_bulk_destroy(self, qs, filtered):
+        """
+        我们规定，批量删除的情况必须用 `id` 指定要删除的数据。
+        """
+        query = str(filtered.query)
+        return '`id` IN (' in query or '`id` =' in query

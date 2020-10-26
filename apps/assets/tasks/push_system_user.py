@@ -2,10 +2,13 @@
 
 from itertools import groupby
 from celery import shared_task
+from common.db.utils import get_object_if_need, get_objects_if_need
 from django.utils.translation import ugettext as _
+from django.db.models import Empty
 
 from common.utils import encrypt_password, get_logger
-from orgs.utils import tmp_to_org, org_aware_func
+from assets.models import SystemUser, Asset
+from orgs.utils import org_aware_func
 from . import const
 from .utils import clean_ansible_task_hosts, group_asset_by_platform
 
@@ -17,20 +20,42 @@ __all__ = [
 ]
 
 
+def _split_by_comma(raw: str):
+    try:
+        return [i.strip() for i in raw.split(',')]
+    except AttributeError:
+        return []
+
+
+def _dump_args(args: dict):
+    return ' '.join([f'{k}={v}' for k, v in args.items() if v is not Empty])
+
+
 def get_push_unixlike_system_user_tasks(system_user, username=None):
     if username is None:
         username = system_user.username
     password = system_user.password
     public_key = system_user.public_key
 
+    groups = _split_by_comma(system_user.system_groups)
+
+    if groups:
+        groups = '"%s"' % ','.join(groups)
+
+    add_user_args = {
+        'name': username,
+        'shell': system_user.shell or Empty,
+        'state': 'present',
+        'home': system_user.home or Empty,
+        'groups': groups or Empty
+    }
+
     tasks = [
         {
             'name': 'Add user {}'.format(username),
             'action': {
                 'module': 'user',
-                'args': 'name={} shell={} state=present'.format(
-                    username, system_user.shell or '/bin/bash',
-                ),
+                'args': _dump_args(add_user_args),
             }
         },
         {
@@ -102,6 +127,11 @@ def get_push_windows_system_user_tasks(system_user, username=None):
     if username is None:
         username = system_user.username
     password = system_user.password
+    groups = {'Users', 'Remote Desktop Users'}
+    if system_user.system_groups:
+        groups.update(_split_by_comma(system_user.system_groups))
+    groups = ','.join(groups)
+
     tasks = []
     if not password:
         return tasks
@@ -116,9 +146,9 @@ def get_push_windows_system_user_tasks(system_user, username=None):
                     'update_password=always '
                     'password_expired=no '
                     'password_never_expires=yes '
-                    'groups="Users,Remote Desktop Users" '
+                    'groups="{}" '
                     'groups_action=add '
-                    ''.format(username, username, password),
+                    ''.format(username, username, password, groups),
         }
     }
     tasks.append(task)
@@ -193,6 +223,7 @@ def push_system_user_util(system_user, assets, task_name, username=None):
 
 @shared_task(queue="ansible")
 def push_system_user_to_assets_manual(system_user, username=None):
+    system_user = get_object_if_need(SystemUser, system_user)
     assets = system_user.get_related_assets()
     task_name = _("Push system users to assets: {}").format(system_user.name)
     return push_system_user_util(system_user, assets, task_name=task_name, username=username)
@@ -211,9 +242,9 @@ def push_system_user_a_asset_manual(system_user, asset, username=None):
 @shared_task(queue="ansible")
 def push_system_user_to_assets(system_user, assets, username=None):
     task_name = _("Push system users to assets: {}").format(system_user.name)
+    system_user = get_object_if_need(SystemUser, system_user)
+    assets = get_objects_if_need(Asset, assets)
     return push_system_user_util(system_user, assets, task_name, username=username)
-
-
 
 # @shared_task
 # @register_as_period_task(interval=3600)

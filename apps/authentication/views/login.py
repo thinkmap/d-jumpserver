@@ -17,17 +17,22 @@ from django.views.generic.base import TemplateView, RedirectView
 from django.views.generic.edit import FormView
 from django.conf import settings
 from django.urls import reverse_lazy
+from django.contrib.auth import BACKEND_SESSION_KEY
 
+from common.const.front_urls import TICKET_DETAIL
 from common.utils import get_request_ip, get_object_or_none
 from users.utils import (
     redirect_user_first_login_or_index
 )
-from .. import forms, mixins, errors
+from ..const import RSA_PRIVATE_KEY, RSA_PUBLIC_KEY
+from .. import mixins, errors, utils
+from ..forms import get_user_login_form_cls
 
 
 __all__ = [
     'UserLoginView', 'UserLogoutView',
     'UserLoginGuardView', 'UserLoginWaitConfirmView',
+    'FlashPasswdTooSimpleMsgView',
 ]
 
 
@@ -35,8 +40,6 @@ __all__ = [
 @method_decorator(csrf_protect, name='dispatch')
 @method_decorator(never_cache, name='dispatch')
 class UserLoginView(mixins.AuthMixin, FormView):
-    form_class = forms.UserLoginForm
-    form_class_captcha = forms.UserLoginCaptchaForm
     key_prefix_captcha = "_LOGIN_INVALID_{}"
     redirect_field_name = 'next'
 
@@ -58,7 +61,7 @@ class UserLoginView(mixins.AuthMixin, FormView):
         if self.request.GET.get("admin", 0):
             return None
         if settings.AUTH_OPENID:
-            redirect_url = reverse("authentication:openid:openid-login")
+            redirect_url = reverse(settings.AUTH_OPENID_AUTH_LOGIN_URL_NAME)
         elif settings.AUTH_CAS:
             redirect_url = reverse(settings.CAS_LOGIN_URL_NAME)
 
@@ -82,15 +85,19 @@ class UserLoginView(mixins.AuthMixin, FormView):
         if not self.request.session.test_cookie_worked():
             return HttpResponse(_("Please enable cookies and try again."))
         try:
-            self.check_user_auth()
+            self.check_user_auth(decrypt_passwd=True)
         except errors.AuthFailedError as e:
             form.add_error(None, e.msg)
             ip = self.get_request_ip()
             cache.set(self.key_prefix_captcha.format(ip), 1, 3600)
-            new_form = self.form_class_captcha(data=form.data)
+            form_cls = get_user_login_form_cls(captcha=True)
+            new_form = form_cls(data=form.data)
             new_form._errors = form.errors
             context = self.get_context_data(form=new_form)
             return self.render_to_response(context)
+        except errors.PasswdTooSimple as e:
+            return redirect(e.url)
+        self.clear_rsa_key()
         return self.redirect_to_guard_view()
 
     def redirect_to_guard_view(self):
@@ -103,14 +110,29 @@ class UserLoginView(mixins.AuthMixin, FormView):
     def get_form_class(self):
         ip = get_request_ip(self.request)
         if cache.get(self.key_prefix_captcha.format(ip)):
-            return self.form_class_captcha
+            return get_user_login_form_cls(captcha=True)
         else:
-            return self.form_class
+            return get_user_login_form_cls()
+
+    def clear_rsa_key(self):
+        self.request.session[RSA_PRIVATE_KEY] = None
+        self.request.session[RSA_PUBLIC_KEY] = None
 
     def get_context_data(self, **kwargs):
+        # 生成加解密密钥对，public_key传递给前端，private_key存入session中供解密使用
+        rsa_private_key = self.request.session.get(RSA_PRIVATE_KEY)
+        rsa_public_key = self.request.session.get(RSA_PUBLIC_KEY)
+        if not all((rsa_private_key, rsa_public_key)):
+            rsa_private_key, rsa_public_key = utils.gen_key_pair()
+            rsa_public_key = rsa_public_key.replace('\n', '\\n')
+            self.request.session[RSA_PRIVATE_KEY] = rsa_private_key
+            self.request.session[RSA_PUBLIC_KEY] = rsa_public_key
+
         context = {
             'demo_mode': os.environ.get("DEMO_MODE"),
             'AUTH_OPENID': settings.AUTH_OPENID,
+            'rsa_public_key': rsa_public_key,
+            'AUTH_DB': settings.AUTH_DB
         }
         kwargs.update(context)
         return super().get_context_data(**kwargs)
@@ -133,13 +155,15 @@ class UserLoginGuardView(mixins.AuthMixin, RedirectView):
             user = self.check_user_auth_if_need()
             self.check_user_mfa_if_need(user)
             self.check_user_login_confirm_if_need(user)
-        except errors.CredentialError:
+        except (errors.CredentialError, errors.SessionEmptyError):
             return self.format_redirect_url(self.login_url)
         except errors.MFARequiredError:
             return self.format_redirect_url(self.login_otp_url)
         except errors.LoginConfirmBaseError:
             return self.format_redirect_url(self.login_confirm_url)
         except errors.MFAUnsetError as e:
+            return e.url
+        except errors.PasswdTooSimple as e:
             return e.url
         else:
             auth_login(self.request, user)
@@ -164,7 +188,7 @@ class UserLoginWaitConfirmView(TemplateView):
         context = super().get_context_data(**kwargs)
         if ticket:
             timestamp_created = datetime.datetime.timestamp(ticket.date_created)
-            ticket_detail_url = reverse('tickets:ticket-detail', kwargs={'pk': ticket_id})
+            ticket_detail_url = TICKET_DETAIL.format(id=ticket_id)
             msg = _("""Wait for <b>{}</b> confirm, You also can copy link to her/him <br/>
                   Don't close this page""").format(ticket.assignees_display)
         else:
@@ -183,20 +207,20 @@ class UserLoginWaitConfirmView(TemplateView):
 class UserLogoutView(TemplateView):
     template_name = 'flash_message_standalone.html'
 
-    @staticmethod
-    def get_backend_logout_url():
-        # if settings.AUTH_CAS:
-        #     return settings.CAS_LOGOUT_URL_NAME
+    def get_backend_logout_url(self):
+        backend = self.request.session.get(BACKEND_SESSION_KEY, '')
+        if 'OIDC' in backend:
+            return settings.AUTH_OPENID_AUTH_LOGOUT_URL_NAME
+        elif 'CAS' in backend:
+            return settings.CAS_LOGOUT_URL_NAME
         return None
 
     def get(self, request, *args, **kwargs):
-        auth_logout(request)
         backend_logout_url = self.get_backend_logout_url()
         if backend_logout_url:
             return redirect(backend_logout_url)
-        next_uri = request.COOKIES.get("next")
-        if next_uri:
-            return redirect(next_uri)
+
+        auth_logout(request)
         response = super().get(request, *args, **kwargs)
         return response
 
@@ -212,4 +236,16 @@ class UserLogoutView(TemplateView):
         return super().get_context_data(**kwargs)
 
 
+@method_decorator(never_cache, name='dispatch')
+class FlashPasswdTooSimpleMsgView(TemplateView):
+    template_name = 'flash_message_standalone.html'
 
+    def get(self, request, *args, **kwargs):
+        context = {
+            'title': _('Please change your password'),
+            'messages': _('Your password is too simple, please change it for security'),
+            'interval': 5,
+            'redirect_url': request.GET.get('redirect_url'),
+            'auto_redirect': True,
+        }
+        return self.render_to_response(context)

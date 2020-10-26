@@ -5,15 +5,15 @@ import re
 import pyotp
 import base64
 import logging
+import time
 
-from django.http import Http404
 from django.conf import settings
 from django.utils.translation import ugettext as _
 from django.core.cache import cache
 from datetime import datetime
 
 from common.tasks import send_mail_async
-from common.utils import reverse, get_object_or_none
+from common.utils import reverse, get_object_or_none, get_request_ip_or_data, get_request_user_agent
 from .models import User
 
 
@@ -38,9 +38,9 @@ def construct_user_created_email_body(user):
         </div>
         """) % {
         'username': user.username,
-        'rest_password_url': reverse('users:reset-password', external=True),
+        'rest_password_url': reverse('authentication:reset-password', external=True),
         'rest_password_token': user.generate_reset_token(),
-        'forget_password_url': reverse('users:forgot-password', external=True),
+        'forget_password_url': reverse('authentication:forgot-password', external=True),
         'email': user.email,
         'login_url': reverse('authentication:login', external=True),
     }
@@ -100,11 +100,53 @@ def send_reset_password_mail(user):
     <br>
     """) % {
         'name': user.name,
-        'rest_password_url': reverse('users:reset-password', external=True),
+        'rest_password_url': reverse('authentication:reset-password', external=True),
         'rest_password_token': user.generate_reset_token(),
-        'forget_password_url': reverse('users:forgot-password', external=True),
+        'forget_password_url': reverse('authentication:forgot-password', external=True),
         'email': user.email,
         'login_url': reverse('authentication:login', external=True),
+    }
+    if settings.DEBUG:
+        logger.debug(message)
+
+    send_mail_async.delay(subject, message, recipient_list, html_message=message)
+
+
+def send_reset_password_success_mail(request, user):
+    subject = _('Reset password success')
+    recipient_list = [user.email]
+    message = _("""
+    
+    Hi %(name)s:
+    <br>
+    
+    
+    <br>
+    Your JumpServer password has just been successfully updated.
+    <br>
+    
+    <br>
+    If the password update was not initiated by you, your account may have security issues. 
+    It is recommended that you log on to the JumpServer immediately and change your password.
+    <br>
+    
+    <br>
+    If you have any questions, you can contact the administrator.
+    <br>
+    <br>
+    ---
+    <br>
+    <br>
+    IP Address: %(ip_address)s
+    <br>
+    <br>
+    Browser: %(browser)s
+    <br>
+    
+    """) % {
+        'name': user.name,
+        'ip_address': get_request_ip_or_data(request),
+        'browser': get_request_user_agent(request),
     }
     if settings.DEBUG:
         logger.debug(message)
@@ -140,7 +182,7 @@ def send_password_expiration_reminder_mail(user):
         'date_password_expired': datetime.fromtimestamp(datetime.timestamp(
             user.date_password_expired)).strftime('%Y-%m-%d %H:%M'),
         'update_password_url': reverse('users:user-password-update', external=True),
-        'forget_password_url': reverse('users:forgot-password', external=True),
+        'forget_password_url': reverse('authentication:forgot-password', external=True),
         'email': user.email,
         'login_url': reverse('authentication:login', external=True),
     }
@@ -205,8 +247,8 @@ def get_user_or_pre_auth_user(request):
 
 
 def redirect_user_first_login_or_index(request, redirect_field_name):
-    if request.user.is_first_login:
-        return reverse('users:user-first-login')
+    # if request.user.is_first_login:
+    #     return reverse('authentication:user-first-login')
     url_in_post = request.POST.get(redirect_field_name)
     if url_in_post:
         return url_in_post
@@ -315,7 +357,7 @@ def construct_user_email(username, email):
 
 def get_current_org_members(exclude=()):
     from orgs.utils import current_org
-    return current_org.get_org_members(exclude=exclude)
+    return current_org.get_members(exclude=exclude)
 
 
 def get_source_choices():
@@ -333,3 +375,15 @@ def get_source_choices():
     if settings.AUTH_CAS:
         choices.append((User.SOURCE_CAS, choices_all[User.SOURCE_CAS]))
     return choices
+
+
+def is_auth_time_valid(session, key):
+    return True if session.get(key, 0) > time.time() else False
+
+
+def is_auth_password_time_valid(session):
+    return is_auth_time_valid(session, 'auth_password_expired_at')
+
+
+def is_auth_otp_time_valid(session):
+    return is_auth_time_valid(session, 'auth_opt_expired_at')

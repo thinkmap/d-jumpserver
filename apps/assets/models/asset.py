@@ -41,10 +41,13 @@ def default_node():
 
 
 class AssetManager(OrgManager):
-    # def get_queryset(self):
-    #     return super().get_queryset().annotate(
-    #         platform_base=models.F('platform__base')
-    #     )
+    def get_queryset(self):
+        return super().get_queryset().annotate(
+            platform_base=models.F('platform__base')
+        )
+
+
+class AssetOrgManager(OrgManager):
     pass
 
 
@@ -222,11 +225,12 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
     hostname_raw = models.CharField(max_length=128, blank=True, null=True, verbose_name=_('Hostname raw'))
 
     labels = models.ManyToManyField('assets.Label', blank=True, related_name='assets', verbose_name=_("Labels"))
-    created_by = models.CharField(max_length=32, null=True, blank=True, verbose_name=_('Created by'))
+    created_by = models.CharField(max_length=128, null=True, blank=True, verbose_name=_('Created by'))
     date_created = models.DateTimeField(auto_now_add=True, null=True, blank=True, verbose_name=_('Date created'))
     comment = models.TextField(max_length=128, default='', blank=True, verbose_name=_('Comment'))
 
     objects = AssetManager.from_queryset(AssetQuerySet)()
+    org_objects = AssetOrgManager.from_queryset(AssetQuerySet)()
     _connectivity = None
 
     def __str__(self):
@@ -351,36 +355,3 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
     class Meta:
         unique_together = [('org_id', 'hostname')]
         verbose_name = _("Asset")
-
-    @classmethod
-    def generate_fake(cls, count=100):
-        from .user import AdminUser, SystemUser
-        from random import seed, choice
-        from django.db import IntegrityError
-        from .node import Node
-        from orgs.utils import get_current_org
-        from orgs.models import Organization
-        org = get_current_org()
-        if not org or not org.is_real():
-            Organization.default().change_to()
-
-        nodes = list(Node.objects.all())
-        seed()
-        for i in range(count):
-            ip = [str(i) for i in random.sample(range(255), 4)]
-            asset = cls(ip='.'.join(ip),
-                        hostname='.'.join(ip),
-                        admin_user=choice(AdminUser.objects.all()),
-                        created_by='Fake')
-            try:
-                asset.save()
-                asset.protocols = 'ssh/22'
-                if nodes and len(nodes) > 3:
-                    _nodes = random.sample(nodes, 3)
-                else:
-                    _nodes = [Node.default_node()]
-                asset.nodes.set(_nodes)
-                logger.debug('Generate fake asset : %s' % asset.ip)
-            except IntegrityError:
-                print('Error continue')
-                continue

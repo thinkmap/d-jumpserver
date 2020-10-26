@@ -9,6 +9,7 @@ from django.utils.translation import ugettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
 
 from common.utils import signer
+from common.fields.model import JsonListCharField
 from .base import BaseUser
 from .asset import Asset
 
@@ -64,26 +65,6 @@ class AdminUser(BaseUser):
         unique_together = [('name', 'org_id')]
         verbose_name = _("Admin user")
 
-    @classmethod
-    def generate_fake(cls, count=10):
-        from random import seed
-        import forgery_py
-        from django.db import IntegrityError
-
-        seed()
-        for i in range(count):
-            obj = cls(name=forgery_py.name.full_name(),
-                      username=forgery_py.internet.user_name(),
-                      password=forgery_py.lorem_ipsum.word(),
-                      comment=forgery_py.lorem_ipsum.sentence(),
-                      created_by='Fake')
-            try:
-                obj.save()
-                logger.debug('Generate fake asset group: %s' % obj.name)
-            except IntegrityError:
-                print('Error continue')
-                continue
-
 
 class SystemUser(BaseUser):
     PROTOCOL_SSH = 'ssh'
@@ -91,12 +72,14 @@ class SystemUser(BaseUser):
     PROTOCOL_TELNET = 'telnet'
     PROTOCOL_VNC = 'vnc'
     PROTOCOL_MYSQL = 'mysql'
+    PROTOCOL_K8S = 'k8s'
     PROTOCOL_CHOICES = (
         (PROTOCOL_SSH, 'ssh'),
         (PROTOCOL_RDP, 'rdp'),
         (PROTOCOL_TELNET, 'telnet'),
         (PROTOCOL_VNC, 'vnc'),
         (PROTOCOL_MYSQL, 'mysql'),
+        (PROTOCOL_K8S, 'k8s'),
     )
 
     LOGIN_AUTO = 'auto'
@@ -118,6 +101,9 @@ class SystemUser(BaseUser):
     login_mode = models.CharField(choices=LOGIN_MODE_CHOICES, default=LOGIN_AUTO, max_length=10, verbose_name=_('Login mode'))
     cmd_filters = models.ManyToManyField('CommandFilter', related_name='system_users', verbose_name=_("Command filter"), blank=True)
     sftp_root = models.CharField(default='tmp', max_length=128, verbose_name=_("SFTP Root"))
+    token = models.TextField(default='', verbose_name=_('Token'))
+    home = models.CharField(max_length=4096, default='', verbose_name=_('Home'), blank=True)
+    system_groups = models.CharField(default='', max_length=4096, verbose_name=_('System groups'), blank=True)
     _prefer = 'system_user'
 
     def __str__(self):
@@ -193,23 +179,3 @@ class SystemUser(BaseUser):
         ordering = ['name']
         unique_together = [('name', 'org_id')]
         verbose_name = _("System user")
-
-    @classmethod
-    def generate_fake(cls, count=10):
-        from random import seed
-        import forgery_py
-        from django.db import IntegrityError
-
-        seed()
-        for i in range(count):
-            obj = cls(name=forgery_py.name.full_name(),
-                      username=forgery_py.internet.user_name(),
-                      password=forgery_py.lorem_ipsum.word(),
-                      comment=forgery_py.lorem_ipsum.sentence(),
-                      created_by='Fake')
-            try:
-                obj.save()
-                logger.debug('Generate fake asset group: %s' % obj.name)
-            except IntegrityError:
-                print('Error continue')
-                continue

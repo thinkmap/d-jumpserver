@@ -1,94 +1,82 @@
-
-import re
+from django.db.models import F
 from rest_framework.serializers import ModelSerializer
 from rest_framework import serializers
-from users.models import User, UserGroup
-from assets.models import Asset, Domain, AdminUser, SystemUser, Label
-from perms.models import AssetPermission
+
+from users.models.user import User
 from common.serializers import AdaptedBulkListSerializer
-from .utils import set_current_org, get_current_org
-from .models import Organization
-from .mixins.serializers import OrgMembershipSerializerMixin
+from common.drf.serializers import BulkModelSerializer
+from common.db.models import concated_display as display
+from .models import Organization, OrganizationMember
 
 
 class OrgSerializer(ModelSerializer):
+    users = serializers.PrimaryKeyRelatedField(many=True, queryset=User.objects.all(), write_only=True, required=False)
+    admins = serializers.PrimaryKeyRelatedField(many=True, queryset=User.objects.all(), write_only=True, required=False)
+    auditors = serializers.PrimaryKeyRelatedField(many=True, queryset=User.objects.all(), write_only=True, required=False)
+
     class Meta:
         model = Organization
         list_serializer_class = AdaptedBulkListSerializer
-        fields = '__all__'
+        fields_mini = ['id', 'name']
+        fields_small = fields_mini + [
+            'created_by', 'date_created', 'comment'
+        ]
+        fields_m2m = ['users', 'admins', 'auditors']
+        fields = fields_small + fields_m2m
         read_only_fields = ['created_by', 'date_created']
 
+    def create(self, validated_data):
+        members = self._pop_memebers(validated_data)
+        instance = Organization.objects.create(**validated_data)
+        OrganizationMember.objects.add_users_by_role(instance, *members)
+        return instance
 
-class OrgReadSerializer(ModelSerializer):
-    admins = serializers.SlugRelatedField(slug_field='name', many=True, read_only=True)
-    auditors = serializers.SlugRelatedField(slug_field='name', many=True, read_only=True)
-    users = serializers.SlugRelatedField(slug_field='name', many=True, read_only=True)
-    user_groups = serializers.SerializerMethodField()
-    assets = serializers.SerializerMethodField()
-    domains = serializers.SerializerMethodField()
-    admin_users = serializers.SerializerMethodField()
-    system_users = serializers.SerializerMethodField()
-    labels = serializers.SerializerMethodField()
-    perms = serializers.SerializerMethodField()
+    def _pop_memebers(self, validated_data):
+        return (
+            validated_data.pop('users', None),
+            validated_data.pop('admins', None),
+            validated_data.pop('auditors', None)
+        )
 
-    class Meta:
-        model = Organization
-        fields = '__all__'
-
-    @staticmethod
-    def get_data_from_model(obj, model):
-        current_org = get_current_org()
-        set_current_org(Organization.root())
-        if model == Asset:
-            data = [o.hostname for o in model.objects.filter(org_id=obj.id)]
-        else:
-            data = [o.name for o in model.objects.filter(org_id=obj.id)]
-        set_current_org(current_org)
-        return data
-
-    def get_user_groups(self, obj):
-        return self.get_data_from_model(obj, UserGroup)
-
-    def get_assets(self, obj):
-        return self.get_data_from_model(obj, Asset)
-
-    def get_domains(self, obj):
-        return self.get_data_from_model(obj, Domain)
-
-    def get_admin_users(self, obj):
-        return self.get_data_from_model(obj, AdminUser)
-
-    def get_system_users(self, obj):
-        return self.get_data_from_model(obj, SystemUser)
-
-    def get_labels(self, obj):
-        return self.get_data_from_model(obj, Label)
-
-    def get_perms(self, obj):
-        return self.get_data_from_model(obj, AssetPermission)
+    def update(self, instance, validated_data):
+        members = self._pop_memebers(validated_data)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        OrganizationMember.objects.set_users_by_role(instance, *members)
+        return instance
 
 
-class OrgMembershipAdminSerializer(OrgMembershipSerializerMixin, ModelSerializer):
-    class Meta:
-        model = Organization.admins.through
-        list_serializer_class = AdaptedBulkListSerializer
-        fields = '__all__'
+class OrgReadSerializer(OrgSerializer):
+    pass
 
 
-class OrgMembershipUserSerializer(OrgMembershipSerializerMixin, ModelSerializer):
-    class Meta:
-        model = Organization.users.through
-        list_serializer_class = AdaptedBulkListSerializer
-        fields = '__all__'
-
-
-class OrgAllUserSerializer(serializers.Serializer):
-    user = serializers.UUIDField(read_only=True, source='id')
-    user_display = serializers.SerializerMethodField()
+class OrgMemberSerializer(BulkModelSerializer):
+    org_display = serializers.CharField(read_only=True)
+    user_display = serializers.CharField(read_only=True)
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
 
     class Meta:
-        only_fields = ['id', 'username', 'name']
+        model = OrganizationMember
+        fields = ('id', 'org', 'user', 'role', 'org_display', 'user_display', 'role_display')
 
-    @staticmethod
-    def get_user_display(obj):
-        return str(obj)
+    def get_unique_together_validators(self):
+        if self.parent:
+            return []
+        return super().get_unique_together_validators()
+
+    @classmethod
+    def setup_eager_loading(cls, queryset):
+        return queryset.annotate(
+            org_display=F('org__name'),
+            user_display=display('user__name', 'user__username')
+        ).distinct()
+
+
+class OrgRetrieveSerializer(OrgReadSerializer):
+    admins = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    auditors = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    users = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+
+    class Meta(OrgReadSerializer.Meta):
+        pass

@@ -5,9 +5,11 @@ from django.db.models.signals import m2m_changed
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
-from .models import Organization
+from orgs.utils import tmp_to_org
+from .models import Organization, OrganizationMember
 from .hands import set_current_org, current_org, Node, get_current_org
-from perms.models import AssetPermission
+from perms.models import (AssetPermission, DatabaseAppPermission,
+                          K8sAppPermission, RemoteAppPermission)
 from users.models import UserGroup
 
 
@@ -26,23 +28,47 @@ def on_org_create_or_update(sender, instance=None, created=False, **kwargs):
         instance.expire_cache()
 
 
-@receiver(m2m_changed, sender=Organization.users.through)
-def on_org_user_changed(sender, instance=None, **kwargs):
-    if isinstance(instance, Organization):
-        old_org = current_org
-        set_current_org(instance)
-        if kwargs['action'] == 'pre_remove':
-            users = kwargs['model'].objects.filter(pk__in=kwargs['pk_set'])
-            for user in users:
-                perms = AssetPermission.objects.filter(users=user)
-                user_groups = UserGroup.objects.filter(users=user)
-                for perm in perms:
-                    perm.users.remove(user)
-                for user_group in user_groups:
-                    user_group.users.remove(user)
-        set_current_org(old_org)
+def _remove_users(model, users, org):
+    with tmp_to_org(org):
+        if not isinstance(users, (tuple, list, set)):
+            users = (users, )
+
+        m2m_model = model.users.through
+        if model.users.reverse:
+            m2m_field_name = model.users.field.m2m_reverse_field_name()
+        else:
+            m2m_field_name = model.users.field.m2m_field_name()
+        m2m_model.objects.filter(**{'user__in': users, f'{m2m_field_name}__org_id': org.id}).delete()
 
 
-@receiver(m2m_changed, sender=Organization.admins.through)
-def on_org_admin_change(sender, **kwargs):
-    Organization._user_admin_orgs = None
+def _clear_users_from_org(org, users):
+    """
+    清理用户在该组织下的相关数据
+    """
+    if not users:
+        return
+
+    models = (AssetPermission, DatabaseAppPermission,
+              RemoteAppPermission, K8sAppPermission, UserGroup)
+
+    for m in models:
+        _remove_users(m, users, org)
+
+
+@receiver(m2m_changed, sender=OrganizationMember)
+def on_org_user_changed(action, instance, reverse, pk_set, **kwargs):
+    if action == 'post_remove':
+        if reverse:
+            user = instance
+            org_pk_set = pk_set
+
+            orgs = Organization.objects.filter(id__in=org_pk_set)
+            for org in orgs:
+                if not org.members.filter(id=user.id).exists():
+                    _clear_users_from_org(org, user)
+        else:
+            org = instance
+            user_pk_set = pk_set
+
+            leaved_users = set(pk_set) - set(org.members.filter(id__in=user_pk_set).values_list('id', flat=True))
+            _clear_users_from_org(org, leaved_users)

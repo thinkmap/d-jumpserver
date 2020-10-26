@@ -26,8 +26,8 @@ __all__ = [
 class UserGrantedDatabaseAppsApi(generics.ListAPIView):
     permission_classes = (IsOrgAdminOrAppUser,)
     serializer_class = DatabaseAppSerializer
-    filter_fields = ['id', 'name']
-    search_fields = ['name']
+    filter_fields = ['id', 'name', 'type', 'comment']
+    search_fields = ['name', 'comment']
 
     def get_object(self):
         user_id = self.kwargs.get('pk', '')
@@ -59,7 +59,8 @@ class UserGrantedDatabaseAppsAsTreeApi(UserGrantedDatabaseAppsApi):
         tree_root = None
         data = []
         if not only_database_app:
-            tree_root = utils.construct_database_apps_tree_root()
+            amount = len(database_apps)
+            tree_root = utils.construct_database_apps_tree_root(amount)
             data.append(tree_root)
         for database_app in database_apps:
             node = utils.parse_database_app_to_tree_node(tree_root, database_app)

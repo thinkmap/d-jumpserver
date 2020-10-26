@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-
-import random
-
-from rest_framework.response import Response
+from assets.api import FilterAssetByNodeMixin
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.generics import RetrieveAPIView
 from django.shortcuts import get_object_or_404
@@ -17,7 +14,7 @@ from .. import serializers
 from ..tasks import (
     update_asset_hardware_info_manual, test_asset_connectivity_manual
 )
-from ..filters import AssetByNodeFilterBackend, LabelFilterBackend
+from ..filters import FilterAssetByNodeFilterBackend, LabelFilterBackend, IpInFilterBackend
 
 
 logger = get_logger(__file__)
@@ -28,12 +25,15 @@ __all__ = [
 ]
 
 
-class AssetViewSet(OrgBulkModelViewSet):
+class AssetViewSet(FilterAssetByNodeMixin, OrgBulkModelViewSet):
     """
     API endpoint that allows Asset to be viewed or edited.
     """
     model = Asset
-    filter_fields = ("hostname", "ip", "systemuser__id", "admin_user__id")
+    filter_fields = (
+        "hostname", "ip", "systemuser__id", "admin_user__id", "platform__base",
+        "is_active", 'ip'
+    )
     search_fields = ("hostname", "ip")
     ordering_fields = ("hostname", "ip", "port", "cpu_cores")
     serializer_classes = {
@@ -41,7 +41,7 @@ class AssetViewSet(OrgBulkModelViewSet):
         'display': serializers.AssetDisplaySerializer,
     }
     permission_classes = (IsOrgAdminOrAppUser,)
-    extra_filter_backends = [AssetByNodeFilterBackend, LabelFilterBackend]
+    extra_filter_backends = [FilterAssetByNodeFilterBackend, LabelFilterBackend, IpInFilterBackend]
 
     def set_assets_node(self, assets):
         if not isinstance(assets, list):
@@ -74,12 +74,16 @@ class AssetPlatformViewSet(ModelViewSet):
     queryset = Platform.objects.all()
     permission_classes = (IsSuperUser,)
     serializer_class = serializers.PlatformSerializer
-    filterset_fields = ['name', 'base']
+    filter_fields = ['name', 'base']
     search_fields = ['name']
 
+    def get_permissions(self):
+        if self.request.method.lower() in ['get', 'options']:
+            self.permission_classes = (IsOrgAdmin,)
+        return super().get_permissions()
+
     def check_object_permissions(self, request, obj):
-        if request.method.lower() in ['delete', 'put', 'patch'] and \
-                obj.internal:
+        if request.method.lower() in ['delete', 'put', 'patch'] and obj.internal:
             self.permission_denied(
                 request, message={"detail": "Internal platform"}
             )

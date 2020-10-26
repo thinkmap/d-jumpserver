@@ -1,8 +1,10 @@
 # ~*~ coding: utf-8 ~*~
+import time
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.shortcuts import redirect
-from django.urls import reverse_lazy, reverse
+from django.urls import reverse_lazy
 from django.utils.translation import ugettext as _
 from django.views.generic.edit import UpdateView, FormView
 from django.contrib.auth import logout as auth_logout
@@ -67,7 +69,7 @@ class UserVerifyPasswordView(FormView):
     def form_valid(self, form):
         user = get_user_or_pre_auth_user(self.request)
         password = form.cleaned_data.get('password')
-        user = authenticate(username=user.username, password=password)
+        user = authenticate(request=self.request, username=user.username, password=password)
         if not user:
             form.add_error("password", _("Password invalid"))
             return self.form_invalid(form)
@@ -76,6 +78,7 @@ class UserVerifyPasswordView(FormView):
             user.save()
         self.request.session['user_id'] = str(user.id)
         self.request.session['auth_password'] = 1
+        self.request.session['auth_password_expired_at'] = time.time() + settings.AUTH_EXPIRED_SECONDS
         return redirect(self.get_success_url())
 
     def get_success_url(self):

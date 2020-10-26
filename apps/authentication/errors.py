@@ -4,12 +4,14 @@ from django.utils.translation import ugettext_lazy as _
 from django.urls import reverse
 from django.conf import settings
 
+from common.exceptions import JMSException
 from .signals import post_auth_failed
 from users.utils import (
     increase_login_failed_count, get_login_failed_count
 )
 
 reason_password_failed = 'password_failed'
+reason_password_decrypt_failed = 'password_decrypt_failed'
 reason_mfa_failed = 'mfa_failed'
 reason_mfa_unset = 'mfa_unset'
 reason_user_not_exist = 'user_not_exist'
@@ -19,6 +21,7 @@ reason_user_inactive = 'user_inactive'
 
 reason_choices = {
     reason_password_failed: _('Username/password check failed'),
+    reason_password_decrypt_failed: _('Password decrypt failed'),
     reason_mfa_failed: _('MFA failed'),
     reason_mfa_unset: _('MFA unset'),
     reason_user_not_exist: _("Username does not exist"),
@@ -92,6 +95,9 @@ class AuthFailedError(Exception):
             'error': self.error,
             'msg': self.msg,
         }
+
+    def __str__(self):
+        return str(self.msg)
 
 
 class CredentialError(AuthFailedNeedLogMixin, AuthFailedNeedBlockMixin, AuthFailedError):
@@ -168,7 +174,7 @@ class MFARequiredError(NeedMoreInfoError):
             'error': self.error,
             'msg': self.msg,
             'data': {
-                'choices': ['otp'],
+                'choices': ['code'],
                 'url': reverse('api-auth:mfa-challenge')
             }
         }
@@ -200,3 +206,17 @@ class LoginConfirmOtherError(LoginConfirmBaseError):
     def __init__(self, ticket_id, status):
         msg = login_confirm_error_msg.format(status)
         super().__init__(ticket_id=ticket_id, msg=msg)
+
+
+class SSOAuthClosed(JMSException):
+    default_code = 'sso_auth_closed'
+    default_detail = _('SSO auth closed')
+
+
+class PasswdTooSimple(JMSException):
+    default_code = 'passwd_too_simple'
+    default_detail = _('Your password is too simple, please change it for security')
+
+    def __init__(self, url, *args, **kwargs):
+        super(PasswdTooSimple, self).__init__(*args, **kwargs)
+        self.url = url
