@@ -1,81 +1,92 @@
 # -*- coding: utf-8 -*-
 #
-from common.utils import lazyproperty
-from common.tree import TreeNodeSerializer
-from ..mixin import UserPermissionMixin
-from ...utils import AssetPermissionUtil, ParserNode
-from ...hands import Node, Asset
+from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext_lazy as _
+from django.core.cache import cache
+from rest_framework.request import Request
+
+from common.utils.http import is_true
+from common.utils import lazyproperty, is_uuid
+from common.exceptions import JMSObjectDoesNotExist
+from rbac.permissions import RBACPermission
+from users.models import User
+from perms.utils import UserPermTreeRefreshUtil
+
+__all__ = ['SelfOrPKUserMixin', 'RebuildTreeMixin']
 
 
-class UserAssetPermissionMixin(UserPermissionMixin):
-    util = None
+class SelfOrPKUserMixin:
+    kwargs: dict
+    request: Request
+    permission_classes = (RBACPermission,)
 
-    def get_cache_policy(self):
-        return self.request.query_params.get('cache_policy', '0')
+    def get_rbac_perms(self):
+        if self.request_user_is_self():
+            return self.self_rbac_perms
+        else:
+            return self.admin_rbac_perms
+
+    @property
+    def self_rbac_perms(self):
+        return (
+            ('list', 'perms.view_myassets'),
+            ('retrieve', 'perms.view_myassets'),
+            ('get_tree', 'perms.view_myassets'),
+            ('GET', 'perms.view_myassets'),
+            ('OPTIONS', 'perms.view_myassets'),
+        )
+
+    @property
+    def admin_rbac_perms(self):
+        return (
+            ('list', 'perms.view_userassets'),
+            ('retrieve', 'perms.view_userassets'),
+            ('get_tree', 'perms.view_userassets'),
+            ('GET', 'perms.view_userassets'),
+            ('OPTIONS', 'perms.view_userassets'),
+        )
+
+    @property
+    def user(self):
+        if self.request_user_is_self():
+            user = self.request.user
+        elif is_uuid(self.kwargs.get('user')):
+            user = get_object_or_404(User, pk=self.kwargs.get('user'))
+        elif hasattr(self, 'swagger_fake_view'):
+            user = self.request.user
+        else:
+            raise JMSObjectDoesNotExist(object_name=_('User'))
+        return user
+
+    def request_user_is_self(self):
+        return self.kwargs.get('user') in ['my', 'self']
+
+
+class RebuildTreeMixin:
+    user: User
+    request: Request
+
+    def get(self, request, *args, **kwargs):
+        UserPermTreeRefreshUtil(self.user).refresh_if_need(force=self.is_force_refresh_tree)
+        return super().get(request, *args, **kwargs)
 
     @lazyproperty
-    def util(self):
-        cache_policy = self.get_cache_policy()
-        system_user_id = self.request.query_params.get("system_user")
-        util = AssetPermissionUtil(self.obj, cache_policy=cache_policy)
-        if system_user_id:
-            util.filter_permissions(system_users=system_user_id)
-        return util
+    def is_force_refresh_tree(self):
+        force = is_true(self.request.query_params.get('rebuild_tree'))
+        if not force:
+            force = self.compute_is_force_refresh()
+        return force
 
-    @lazyproperty
-    def tree(self):
-        return self.util.get_user_tree()
-
-
-class UserNodeTreeMixin:
-    serializer_class = TreeNodeSerializer
-    nodes_only_fields = ParserNode.nodes_only_fields
-
-    def parse_nodes_to_queryset(self, nodes):
-        nodes = nodes.only(*self.nodes_only_fields)
-        _queryset = []
-
-        for node in nodes:
-            assets_amount = self.tree.valid_assets_amount(node.key)
-            if assets_amount == 0 and not node.key.startswith('-'):
-                continue
-            node.assets_amount = assets_amount
-            data = ParserNode.parse_node_to_tree_node(node)
-            _queryset.append(data)
-        return _queryset
-
-    def get_serializer_queryset(self, queryset):
-        queryset = self.parse_nodes_to_queryset(queryset)
-        return queryset
-
-    def get_serializer(self, queryset=None, many=True, **kwargs):
-        if queryset is None:
-            queryset = Node.objects.none()
-        queryset = self.get_serializer_queryset(queryset)
-        queryset.sort()
-        return super().get_serializer(queryset, many=many, **kwargs)
-
-
-class UserAssetTreeMixin:
-    serializer_class = TreeNodeSerializer
-    nodes_only_fields = ParserNode.assets_only_fields
-
-    @staticmethod
-    def parse_assets_to_queryset(assets, node):
-        _queryset = []
-        for asset in assets:
-            data = ParserNode.parse_asset_to_tree_node(node, asset)
-            _queryset.append(data)
-        return _queryset
-
-    def get_serializer_queryset(self, queryset):
-        queryset = queryset.only(*self.nodes_only_fields)
-        _queryset = self.parse_assets_to_queryset(queryset, None)
-        return _queryset
-
-    def get_serializer(self, queryset=None, many=True, **kwargs):
-        if queryset is None:
-            queryset = Asset.objects.none()
-        queryset = self.get_serializer_queryset(queryset)
-        queryset.sort()
-        return super().get_serializer(queryset, many=many, **kwargs)
+    def compute_is_force_refresh(self):
+        """ 5s 内连续刷新三次转为强制刷新 """
+        force_timeout = 5
+        force_max_count = 3
+        force_cache_key = '{user_id}:{path}'.format(user_id=self.user.id, path=self.request.path)
+        count = cache.get(force_cache_key, 1)
+        if count >= force_max_count:
+            force = True
+            cache.delete(force_cache_key)
+        else:
+            force = False
+            cache.set(force_cache_key, count + 1, force_timeout)
+        return force

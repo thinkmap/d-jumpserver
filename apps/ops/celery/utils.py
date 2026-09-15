@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 #
 import json
-import os
 
+import redis
+import redis_lock
 from django.conf import settings
-from django.utils.timezone import get_current_timezone
 from django.db.utils import ProgrammingError, OperationalError
+from django.utils.timezone import get_current_timezone
 from django_celery_beat.models import (
     PeriodicTask, IntervalSchedule, CrontabSchedule, PeriodicTasks
 )
 
 from common.utils import get_logger
+from common.utils.timezone import local_now
 
 logger = get_logger(__name__)
 
@@ -34,6 +36,8 @@ def create_or_update_celery_periodic_tasks(tasks):
     for name, detail in tasks.items():
         interval = None
         crontab = None
+        last_run_at = None
+
         try:
             IntervalSchedule.objects.all().count()
         except (ProgrammingError, OperationalError):
@@ -48,6 +52,7 @@ def create_or_update_celery_periodic_tasks(tasks):
             interval = IntervalSchedule.objects.filter(**kwargs).first()
             if interval is None:
                 interval = IntervalSchedule.objects.create(**kwargs)
+            last_run_at = local_now()
         elif isinstance(detail.get("crontab"), str):
             try:
                 minute, hour, day, month, week = detail["crontab"].split()
@@ -62,7 +67,7 @@ def create_or_update_celery_periodic_tasks(tasks):
             if crontab is None:
                 crontab = CrontabSchedule.objects.create(**kwargs)
         else:
-            logger.error("Schedule is not valid")
+            logger.warning("Schedule is not valid: %s" % name)
             return
 
         defaults = dict(
@@ -72,8 +77,12 @@ def create_or_update_celery_periodic_tasks(tasks):
             task=detail['task'],
             args=json.dumps(detail.get('args', [])),
             kwargs=json.dumps(detail.get('kwargs', {})),
-            description=detail.get('description') or ''
+            description=detail.get('description') or '',
+            last_run_at=last_run_at,
         )
+        enabled = detail.get('enabled')
+        if enabled is not None:
+            defaults["enabled"] = enabled
         task = PeriodicTask.objects.update_or_create(
             defaults=defaults, name=name,
         )
@@ -93,9 +102,37 @@ def delete_celery_periodic_task(task_name):
     PeriodicTasks.update_changed()
 
 
+def get_celery_periodic_task(task_name):
+    from django_celery_beat.models import PeriodicTask
+    task = PeriodicTask.objects.filter(name=task_name).first()
+    return task
+
+
 def get_celery_task_log_path(task_id):
-    task_id = str(task_id)
-    rel_path = os.path.join(task_id[0], task_id[1], task_id + '.log')
-    path = os.path.join(settings.CELERY_LOG_DIR, rel_path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    return path
+    from ops.utils import get_task_log_path
+    return get_task_log_path(settings.CELERY_LOG_DIR, task_id)
+
+
+def get_celery_status():
+    from . import app
+    i = app.control.inspect()
+    ping_data = i.ping() or {}
+    active_nodes = [k for k, v in ping_data.items() if v.get('ok') == 'pong']
+    active_queue_worker = set([n.split('@')[0] for n in active_nodes if n])
+    # Celery Worker 数量: 2
+    if len(active_queue_worker) < 2:
+        print("Not all celery worker worked")
+        return False
+    else:
+        return True
+
+
+def get_beat_status():
+    CONFIG = settings.CONFIG
+    r = redis.Redis(host=CONFIG.REDIS_HOST, port=CONFIG.REDIS_PORT, password=CONFIG.REDIS_PASSWORD)
+    lock = redis_lock.Lock(r, name="beat-distribute-start-lock")
+    try:
+        locked = lock.locked()
+        return locked
+    except redis.ConnectionError:
+        return False

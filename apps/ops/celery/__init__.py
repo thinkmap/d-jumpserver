@@ -2,12 +2,14 @@
 
 import os
 
-from kombu import Exchange, Queue
 from celery import Celery
+from kombu import Exchange, Queue
 
 # set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jumpserver.settings')
 from jumpserver import settings
+from .heatbeat import *
+
 # from django.conf import settings
 
 app = Celery('jumpserver')
@@ -20,9 +22,6 @@ configs["CELERY_QUEUES"] = [
     Queue("celery", Exchange("celery"), routing_key="celery"),
     Queue("ansible", Exchange("ansible"), routing_key="ansible"),
 ]
-configs["CELERY_ROUTES"] = {
-    "ops.tasks.run_ansible_task": {'exchange': 'ansible', 'routing_key': 'ansible'},
-}
 
 app.namespace = 'CELERY'
 app.conf.update(configs)

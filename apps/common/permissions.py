@@ -1,184 +1,121 @@
 # -*- coding: utf-8 -*-
 #
+import hmac
 import time
 
-from rest_framework import permissions
-from django.contrib.auth.mixins import UserPassesTestMixin
 from django.conf import settings
+from django.core.cache import cache
+from rest_framework import permissions
 
-from orgs.utils import current_org
 
-
-class IsValidUser(permissions.IsAuthenticated, permissions.BasePermission):
+class IsValidUser(permissions.IsAuthenticated):
     """Allows access to valid user, is active and not expired"""
 
     def has_permission(self, request, view):
-        return super(IsValidUser, self).has_permission(request, view) \
+        return super().has_permission(request, view) \
             and request.user.is_valid
 
 
-class IsAppUser(IsValidUser):
-    """Allows access only to app user """
-
+class OnlySuperUser(IsValidUser):
     def has_permission(self, request, view):
-        return super(IsAppUser, self).has_permission(request, view) \
-            and request.user.is_app
+        return super().has_permission(request, view) \
+            and request.user.is_superuser
 
 
-class IsSuperUser(IsValidUser):
+class OnlyAdminSuperUser(IsValidUser):
     def has_permission(self, request, view):
-        return super(IsSuperUser, self).has_permission(request, view) \
-               and request.user.is_superuser
+        return super().has_permission(request, view) \
+            and request.user.is_superuser \
+            and request.user.username == 'admin'
 
 
-class IsSuperUserOrAppUser(IsSuperUser):
+class IsServiceAccount(IsValidUser):
     def has_permission(self, request, view):
-        return super(IsSuperUserOrAppUser, self).has_permission(request, view) \
-            or request.user.is_app
-
-
-class IsSuperAuditor(IsValidUser):
-    def has_permission(self, request, view):
-        return super(IsSuperAuditor, self).has_permission(request, view) \
-               and request.user.is_super_auditor
-
-
-class IsOrgAuditor(IsValidUser):
-    def has_permission(self, request, view):
-        if not current_org:
-            return False
-        return super(IsOrgAuditor, self).has_permission(request, view) \
-               and current_org.can_audit_by(request.user)
-
-
-class IsOrgAdmin(IsValidUser):
-    """Allows access only to superuser"""
-
-    def has_permission(self, request, view):
-        if not current_org:
-            return False
-        return super(IsOrgAdmin, self).has_permission(request, view) \
-            and current_org.can_admin_by(request.user)
-
-
-class IsOrgAdminOrAppUser(IsValidUser):
-    """Allows access between superuser and app user"""
-
-    def has_permission(self, request, view):
-        if not current_org:
-            return False
-        return super(IsOrgAdminOrAppUser, self).has_permission(request, view) \
-            and (current_org.can_admin_by(request.user) or request.user.is_app)
-
-
-class IsOrgAdminOrAppUserOrUserReadonly(IsOrgAdminOrAppUser):
-    def has_permission(self, request, view):
-        if IsValidUser.has_permission(self, request, view) \
-                and request.method in permissions.SAFE_METHODS:
-            return True
-        else:
-            return IsOrgAdminOrAppUser.has_permission(self, request, view)
-
-
-class IsCurrentUserOrReadOnly(permissions.BasePermission):
-    def has_object_permission(self, request, view, obj):
-        if request.method in permissions.SAFE_METHODS:
-            return True
-        return obj == request.user
+        return super().has_permission(request, view) \
+            and request.user.is_service_account
 
 
 class WithBootstrapToken(permissions.BasePermission):
+    def check_can_register(self):
+        enabled = settings.SECURITY_SERVICE_ACCOUNT_REGISTRATION
+        if enabled == 'auto':
+            if cache.get(f'APPLET_HOST_DELOYING'):
+                return True
+            return time.time() - settings.JUMPSERVER_UPTIME < 300
+        elif enabled:
+            return True
+        else:
+            return False
+
     def has_permission(self, request, view):
         authorization = request.META.get('HTTP_AUTHORIZATION', '')
         if not authorization:
             return False
+
+        if not self.check_can_register():
+            return False
+
         request_bootstrap_token = authorization.split()[-1]
-        return settings.BOOTSTRAP_TOKEN == request_bootstrap_token
+        return hmac.compare_digest(
+            settings.BOOTSTRAP_TOKEN.encode(),
+            request_bootstrap_token.encode()
+        )
 
 
-class PermissionsMixin(UserPassesTestMixin):
-    permission_classes = []
-
-    def get_permissions(self):
-        return self.permission_classes
-
-    def test_func(self):
-        permission_classes = self.get_permissions()
-        for permission_class in permission_classes:
-            if not permission_class().has_permission(self.request, self):
+class ServiceAccountSignaturePermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        from authentication.models import AccessKey
+        from common.utils.crypto import get_aes_crypto
+        signature = request.META.get('HTTP_X_JMS_SVC', '')
+        if not signature or not signature.startswith('Sign'):
+            return False
+        data = signature[4:].strip()
+        if not data or ':' not in data:
+            return False
+        ak_id, time_sign = data.split(':', 1)
+        if not ak_id or not time_sign:
+            return False
+        ak = AccessKey.objects.filter(id=ak_id).first()
+        if not ak or not ak.is_active:
+            return False
+        if not ak.user or not ak.user.is_active or not ak.user.is_service_account:
+            return False
+        aes = get_aes_crypto(str(ak.secret).replace('-', ''), mode='ECB')
+        try:
+            timestamp = aes.decrypt(time_sign)
+            if not timestamp or not timestamp.isdigit():
                 return False
-        return True
-
-
-class UserCanUpdatePassword:
-    def has_permission(self, request, view):
-        return request.user.can_update_password()
-
-
-class UserCanUpdateSSHKey:
-    def has_permission(self, request, view):
-        return request.user.can_update_ssh_key()
-
-
-class NeedMFAVerify(permissions.BasePermission):
-    def has_permission(self, request, view):
-        mfa_verify_time = request.session.get('MFA_VERIFY_TIME', 0)
-        if time.time() - mfa_verify_time < settings.SECURITY_MFA_VERIFY_TTL:
+            timestamp = int(timestamp)
+            interval = abs(int(time.time()) - timestamp)
+            if interval > 30:
+                return False
             return True
+        except Exception:
+            return False
+
+    def has_object_permission(self, request, view, obj):
         return False
 
 
-class CanUpdateDeleteUser(permissions.BasePermission):
+class IsValidLicense(permissions.BasePermission):
 
-    @staticmethod
-    def has_delete_object_permission(request, view, obj):
-        if request.user.is_anonymous:
-            return False
-        if not request.user.can_admin_current_org:
-            return False
-        # 超级管理员 / 组织管理员
-        if str(request.user.id) == str(obj.id):
-            return False
-        # 超级管理员
-        if request.user.is_superuser:
-            if obj.is_superuser and obj.username in ['admin']:
-                return False
-            return True
-        # 组织管理员
-        if obj.is_superuser:
-            return False
-        if obj.is_super_auditor:
-            return False
-        if obj.can_admin_current_org:
-            return False
-        return True
+    def has_permission(self, request, view):
+        return settings.XPACK_LICENSE_IS_VALID
 
-    @staticmethod
-    def has_update_object_permission(request, view, obj):
-        if request.user.is_anonymous:
-            return False
-        if not request.user.can_admin_current_org:
-            return False
-        # 超级管理员 / 组织管理员
-        if str(request.user.id) == str(obj.id):
-            return True
-        # 超级管理员
-        if request.user.is_superuser:
-            return True
-        # 组织管理员
-        if obj.is_superuser:
-            return False
-        if obj.is_super_auditor:
-            return False
-        return True
 
+class IsValidLicenseForWriteAction(permissions.BasePermission):
+    """Allow read for all, require valid license for write operations"""
+
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return settings.XPACK_LICENSE_IS_VALID
+
+
+class IsOwnerOrAdminWritable(IsValidUser):
     def has_object_permission(self, request, view, obj):
-        if request.user.is_anonymous:
+        if request.user.is_superuser:
+            return super().has_permission(request, view)
+        if request.method != 'GET' and obj.creator != request.user:
             return False
-        if not request.user.can_admin_current_org:
-            return False
-        if request.method in ['DELETE']:
-            return self.has_delete_object_permission(request, view, obj)
-        if request.method in ['PUT', 'PATCH']:
-            return self.has_update_object_permission(request, view, obj)
-        return True
+        return super().has_permission(request, view)

@@ -1,53 +1,36 @@
 # -*- coding: utf-8 -*-
 #
-from rest_framework.generics import UpdateAPIView
+from django.contrib.auth import logout as auth_logout
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.shortcuts import get_object_or_404
-from django.utils.translation import ugettext as _
 
-from common.utils import get_logger, get_object_or_none
-from common.permissions import IsOrgAdmin
-from ..models import LoginConfirmSetting
-from ..serializers import LoginConfirmSettingSerializer
+from common.utils import get_logger
 from .. import errors, mixins
 
-__all__ = ['LoginConfirmSettingUpdateApi', 'TicketStatusApi']
+__all__ = ['TicketStatusApi']
+
 logger = get_logger(__name__)
 
 
-class LoginConfirmSettingUpdateApi(UpdateAPIView):
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = LoginConfirmSettingSerializer
-
-    def get_object(self):
-        from users.models import User
-        user_id = self.kwargs.get('user_id')
-        user = get_object_or_404(User, pk=user_id)
-        defaults = {'user': user}
-        s, created = LoginConfirmSetting.objects.get_or_create(
-            defaults, user=user,
-        )
-        return s
-
-
 class TicketStatusApi(mixins.AuthMixin, APIView):
-    permission_classes = ()
-
-    def get_ticket(self):
-        from tickets.models import Ticket
-        ticket_id = self.request.session.get("auth_ticket_id")
-        logger.debug('Login confirm ticket id: {}'.format(ticket_id))
-        if not ticket_id:
-            ticket = None
-        else:
-            ticket = get_object_or_none(Ticket, pk=ticket_id)
-        return ticket
+    permission_classes = (AllowAny,)
 
     def get(self, request, *args, **kwargs):
         try:
             self.check_user_login_confirm()
+            self.request.session['auth_third_party_done'] = 1
+            self.request.session.pop('auth_third_party_required', '')
             return Response({"msg": "ok"})
+        except errors.LoginConfirmOtherError as e:
+            reason = e.msg
+            username = e.username
+            self.send_auth_signal(success=False, username=username, reason=reason)
+            auth_ticket_id = request.session.pop('auth_ticket_id', '')
+            # 若为三方登录，此时应退出登录
+            auth_logout(request)
+            request.session['auth_ticket_id'] = auth_ticket_id
+            return Response(e.as_data(), status=200)
         except errors.NeedMoreInfoError as e:
             return Response(e.as_data(), status=200)
 
@@ -55,5 +38,5 @@ class TicketStatusApi(mixins.AuthMixin, APIView):
         ticket = self.get_ticket()
         if ticket:
             request.session.pop('auth_ticket_id', '')
-            ticket.perform_status('closed', request.user)
+            ticket.close()
         return Response('', status=200)

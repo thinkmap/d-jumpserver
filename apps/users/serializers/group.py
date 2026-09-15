@@ -1,35 +1,35 @@
 # -*- coding: utf-8 -*-
 #
-from django.utils.translation import ugettext_lazy as _
-
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
 
-from common.serializers import AdaptedBulkListSerializer
+from common.serializers.fields import ObjectRelatedField
+from common.serializers.mixin import ResourceLabelsMixin
 from orgs.mixins.serializers import BulkOrgResourceModelSerializer
-from django.db.models import Count
-from ..models import User, UserGroup
 from .. import utils
+from ..models import User, UserGroup
 
 __all__ = [
-    'UserGroupSerializer',
+    'UserGroupSerializer', 'UserGroupListSerializer',
 ]
 
 
-class UserGroupSerializer(BulkOrgResourceModelSerializer):
-    users = serializers.PrimaryKeyRelatedField(
-        required=False, many=True, queryset=User.objects, label=_('User'),
-        write_only=True
+class UserGroupSerializer(ResourceLabelsMixin, BulkOrgResourceModelSerializer):
+    users = ObjectRelatedField(
+        required=False, many=True, queryset=User.objects,
+        attrs=("id", "name", "is_service_account"), label=_('Users'),
     )
 
     class Meta:
         model = UserGroup
-        list_serializer_class = AdaptedBulkListSerializer
-        fields = [
-            'id', 'name',  'users', 'users_amount', 'comment',
-            'date_created', 'created_by',
+        fields_mini = ['id', 'name']
+        fields_small = fields_mini + [
+            'comment', 'date_created', 'created_by'
         ]
+        fields = fields_mini + fields_small + ['users', 'labels']
         extra_kwargs = {
-            'created_by': {'label': _('Created by'), 'read_only': True}
+            'created_by': {'label': _('Created by'), 'read_only': True},
+            'id': {'label': _('ID')},
         }
 
     def __init__(self, *args, **kwargs):
@@ -37,18 +37,23 @@ class UserGroupSerializer(BulkOrgResourceModelSerializer):
         self.set_fields_queryset()
 
     def set_fields_queryset(self):
-        users_field = self.fields['users']
-        users_field.child_relation.queryset = utils.get_current_org_members()
+        users_field = self.fields.get('users')
+        if users_field:
+            users_field.child_relation.queryset = utils.get_current_org_members()
 
-    def validate_users(self, users):
-        for user in users:
-            if user.is_super_auditor:
-                msg = _('Auditors cannot be join in the user group')
-                raise serializers.ValidationError(msg)
-        return users
 
-    @classmethod
-    def setup_eager_loading(cls, queryset):
-        """ Perform necessary eager loading of data. """
-        queryset = queryset.annotate(users_amount=Count('users'))
-        return queryset
+class UserGroupListSerializer(UserGroupSerializer):
+    users_amount = serializers.IntegerField(label=_('Users amount'), read_only=True)
+
+    class Meta(UserGroupSerializer.Meta):
+        relation_count_fields = {
+            'users_amount': {
+                'relation': 'users',
+                'related_filters': {'is_service_account': False},
+            },
+        }
+        amount_fields = list(relation_count_fields)
+        fields = list(set(UserGroupSerializer.Meta.fields + amount_fields) - {'users'})
+        extra_kwargs = {
+            **UserGroupSerializer.Meta.extra_kwargs,
+        }

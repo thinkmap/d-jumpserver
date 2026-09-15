@@ -1,110 +1,120 @@
 # -*- coding: utf-8 -*-
 #
 
-ASSETS_CACHE_KEY = "terminal__session__assets"
-USERS_CACHE_KEY = "terminal__session__users"
-SYSTEM_USER_CACHE_KEY = "terminal__session__system_users"
+from django.db.models import TextChoices, IntegerChoices
+from django.utils.translation import gettext_lazy as _
 
 
-# Replay Storage
+class RiskLevelChoices(IntegerChoices):
+    accept = 0, _('Accept')
+    warning = 4, _('Warning')
+    reject = 5, _('Reject')
+    review_reject = 6, _('Review & Reject')
+    review_accept = 7, _('Review & Accept')
+    review_cancel = 8, _('Review & Cancel')
 
-REPLAY_STORAGE_TYPE_NULL = 'null'
-REPLAY_STORAGE_TYPE_SERVER = 'server'
-REPLAY_STORAGE_TYPE_S3 = 's3'
-REPLAY_STORAGE_TYPE_CEPH = 'ceph'
-REPLAY_STORAGE_TYPE_SWIFT = 'swift'
-REPLAY_STORAGE_TYPE_OSS = 'oss'
-REPLAY_STORAGE_TYPE_AZURE = 'azure'
-
-REPLAY_STORAGE_TYPE_EMPTY_FIELDS = []
-REPLAY_STORAGE_TYPE_S3_FIELDS = [
-    {'name': 'BUCKET'},
-    {'name': 'ACCESS_KEY', 'write_only': True},
-    {'name': 'SECRET_KEY', 'write_only': True},
-    {'name': 'ENDPOINT'}
-]
-REPLAY_STORAGE_TYPE_CEPH_FIELDS = [
-    {'name': 'BUCKET'},
-    {'name': 'ACCESS_KEY', 'write_only': True},
-    {'name': 'SECRET_KEY', 'write_only': True},
-    {'name': 'ENDPOINT'}
-]
-REPLAY_STORAGE_TYPE_SWIFT_FIELDS = [
-    {'name': 'BUCKET'},
-    {'name': 'ACCESS_KEY', 'write_only': True},
-    {'name': 'SECRET_KEY', 'write_only': True},
-    {'name': 'REGION'},
-    {'name': 'ENDPOINT'},
-    {'name': 'PROTOCOL'},
-]
-REPLAY_STORAGE_TYPE_OSS_FIELDS = [
-    {'name': 'BUCKET'},
-    {'name': 'ACCESS_KEY', 'write_only': True},
-    {'name': 'SECRET_KEY', 'write_only': True},
-    {'name': 'ENDPOINT'}
-]
-REPLAY_STORAGE_TYPE_AZURE_FIELDS = [
-    {'name': 'CONTAINER_NAME'},
-    {'name': 'ACCOUNT_NAME'},
-    {'name': 'ACCOUNT_KEY', 'write_only': True},
-    {'name': 'ENDPOINT_SUFFIX'}
-]
-
-REPLAY_STORAGE_TYPE_FIELDS_MAP = {
-    REPLAY_STORAGE_TYPE_NULL: REPLAY_STORAGE_TYPE_EMPTY_FIELDS,
-    REPLAY_STORAGE_TYPE_SERVER: REPLAY_STORAGE_TYPE_EMPTY_FIELDS,
-    REPLAY_STORAGE_TYPE_S3: REPLAY_STORAGE_TYPE_S3_FIELDS,
-    REPLAY_STORAGE_TYPE_CEPH: REPLAY_STORAGE_TYPE_CEPH_FIELDS,
-    REPLAY_STORAGE_TYPE_SWIFT: REPLAY_STORAGE_TYPE_SWIFT_FIELDS,
-    REPLAY_STORAGE_TYPE_OSS: REPLAY_STORAGE_TYPE_OSS_FIELDS,
-    REPLAY_STORAGE_TYPE_AZURE: REPLAY_STORAGE_TYPE_AZURE_FIELDS
-}
-
-REPLAY_STORAGE_TYPE_CHOICES_DEFAULT = [
-    (REPLAY_STORAGE_TYPE_NULL, 'Null'),
-    (REPLAY_STORAGE_TYPE_SERVER, 'Server'),
-]
-
-REPLAY_STORAGE_TYPE_CHOICES_EXTENDS = [
-    (REPLAY_STORAGE_TYPE_S3, 'S3'),
-    (REPLAY_STORAGE_TYPE_CEPH, 'Ceph'),
-    (REPLAY_STORAGE_TYPE_SWIFT, 'Swift'),
-    (REPLAY_STORAGE_TYPE_OSS, 'OSS'),
-    (REPLAY_STORAGE_TYPE_AZURE, 'Azure')
-]
-
-REPLAY_STORAGE_TYPE_CHOICES = REPLAY_STORAGE_TYPE_CHOICES_DEFAULT + \
-                              REPLAY_STORAGE_TYPE_CHOICES_EXTENDS
+    @classmethod
+    def get_label(cls, level):
+        label = dict(cls.choices).get(level)
+        return label
 
 
-# Command Storage
+class ReplayStorageType(TextChoices):
+    null = 'null', 'Null',
+    server = 'server', 'Server'
+    s3 = 's3', 'S3'
+    ceph = 'ceph', 'Ceph'
+    swift = 'swift', 'Swift'
+    oss = 'oss', 'OSS'
+    azure = 'azure', 'Azure'
+    obs = 'obs', 'OBS'
+    cos = 'cos', 'COS'
+    sftp = 'sftp', 'SFTP'
 
-COMMAND_STORAGE_TYPE_NULL = 'null'
-COMMAND_STORAGE_TYPE_SERVER = 'server'
-COMMAND_STORAGE_TYPE_ES = 'es'
 
-COMMAND_STORAGE_TYPE_EMPTY_FIELDS = []
-COMMAND_STORAGE_TYPE_ES_FIELDS = [
-    {'name': 'HOSTS'},
-    {'name': 'INDEX'},
-    {'name': 'DOC_TYPE'}
-]
+class CommandStorageType(TextChoices):
+    null = 'null', 'Null',
+    server = 'server', 'Server'
+    es = 'es', 'Elasticsearch'
 
-COMMAND_STORAGE_TYPE_FIELDS_MAP = {
-    COMMAND_STORAGE_TYPE_NULL: COMMAND_STORAGE_TYPE_EMPTY_FIELDS,
-    COMMAND_STORAGE_TYPE_SERVER: COMMAND_STORAGE_TYPE_EMPTY_FIELDS,
-    COMMAND_STORAGE_TYPE_ES: COMMAND_STORAGE_TYPE_ES_FIELDS,
-}
 
-COMMAND_STORAGE_TYPE_CHOICES_DEFAULT = [
-    (COMMAND_STORAGE_TYPE_NULL, 'Null'),
-    (COMMAND_STORAGE_TYPE_SERVER, 'Server'),
-]
+# Component Status Choices
+# ------------------------
 
-COMMAND_STORAGE_TYPE_CHOICES_EXTENDS = [
-    (COMMAND_STORAGE_TYPE_ES, 'Elasticsearch')
-]
+class ComponentLoad(TextChoices):
+    critical = 'critical', _('Critical')
+    high = 'high', _('High')
+    normal = 'normal', _('Normal')
+    offline = 'offline', _('Offline')
 
-COMMAND_STORAGE_TYPE_CHOICES = COMMAND_STORAGE_TYPE_CHOICES_DEFAULT + \
-                               COMMAND_STORAGE_TYPE_CHOICES_EXTENDS
+    @classmethod
+    def status(cls):
+        return set(dict(cls.choices).keys())
 
+
+class TerminalType(TextChoices):
+    koko = 'koko', 'KoKo'
+    guacamole = 'guacamole', 'Guacamole'
+    omnidb = 'omnidb', 'OmniDB'
+    xrdp = 'xrdp', 'Xrdp'
+    lion = 'lion', 'Lion'
+    core = 'core', 'Core'
+    celery = 'celery', 'Celery'
+    magnus = 'magnus', 'Magnus'
+    razor = 'razor', 'Razor'
+    tinker = 'tinker', 'Tinker'
+    video_worker = 'video_worker', 'Video Worker'
+    chen = 'chen', 'Chen'
+    kael = 'kael', 'Kael'
+    panda = 'panda', 'Panda'
+    nec = 'nec', 'Nec'
+    facelive = 'facelive', 'Facelive'
+
+    @classmethod
+    def types(cls):
+        return set(dict(cls.choices).keys())
+
+
+class PublishStatus(TextChoices):
+    pending = 'pending', _('Pending')
+    success = 'success', _("Success")
+    failed = 'failed', _("Failed")
+    mismatch = 'mismatch', _("Mismatch")
+
+
+class SessionType(TextChoices):
+    normal = 'normal', _('Normal')
+    tunnel = 'tunnel', _('Tunnel')
+    command = 'command', _('Command')
+    sftp = 'sftp', _('SFTP')
+
+
+class ActionPermission(TextChoices):
+    readonly = "readonly", _('Read only')
+    writable = "writable", _('Writable')
+
+
+class TaskNameType(TextChoices):
+    kill_session = "kill_session", _('Kill session')
+    lock_session = "lock_session", _('Lock session')
+    unlock_session = "unlock_session", _('Unlock session')
+
+
+class SessionErrorReason(TextChoices):
+    connect_failed = 'connect_failed', _('Connect failed')
+    replay_create_failed = 'replay_create_failed', _('Replay create failed')
+    replay_upload_failed = 'replay_upload_failed', _('Replay upload failed')
+    replay_convert_failed = 'replay_convert_failed', _('Replay convert failed')
+    replay_unsupported = 'replay_unsupported', _('Replay unsupported')
+
+
+class LoginFrom(TextChoices):
+    ST = 'ST', 'SSH Terminal'
+    RT = 'RT', 'RDP Terminal'
+    WT = 'WT', 'Web Terminal'
+    DT = 'DT', 'DB Terminal'
+    VT = 'VT', 'VNC Terminal'
+
+    @classmethod
+    def as_dict(cls):
+        return {choice.value: choice.label for choice in cls}

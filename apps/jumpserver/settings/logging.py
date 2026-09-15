@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 #
 import os
+
 from ..const import PROJECT_DIR, CONFIG
 
-LOG_DIR = os.path.join(PROJECT_DIR, 'logs')
+LOG_DIR = os.path.join(PROJECT_DIR, 'data', 'logs')
 JUMPSERVER_LOG_FILE = os.path.join(LOG_DIR, 'jumpserver.log')
-ANSIBLE_LOG_FILE = os.path.join(LOG_DIR, 'ansible.log')
+DRF_EXCEPTION_LOG_FILE = os.path.join(LOG_DIR, 'drf_exception.log')
+UNEXPECTED_EXCEPTION_LOG_FILE = os.path.join(LOG_DIR, 'unexpected_exception.log')
 GUNICORN_LOG_FILE = os.path.join(LOG_DIR, 'gunicorn.log')
 LOG_LEVEL = CONFIG.LOG_LEVEL
 
@@ -14,11 +16,15 @@ LOGGING = {
     'disable_existing_loggers': False,
     'formatters': {
         'verbose': {
-            'format': '%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d %(message)s'
+            'format': '%(levelname)s %(asctime)s %(pathname)s:%(lineno)d  %(message)s'
         },
         'main': {
             'datefmt': '%Y-%m-%d %H:%M:%S',
-            'format': '%(asctime)s [%(module)s %(levelname)s] %(message)s',
+            'format': '%(asctime)s [%(levelname).4s] %(message)s',
+        },
+        'exception': {
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+            'format': '\n%(asctime)s [%(levelname)s] %(message)s',
         },
         'simple': {
             'format': '%(levelname)s %(message)s'
@@ -43,20 +49,26 @@ LOGGING = {
         'file': {
             'encoding': 'utf8',
             'level': 'DEBUG',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'maxBytes': 1024*1024*100,
-            'backupCount': 7,
+            'class': 'jumpserver.rewriting.logging.DailyTimedRotatingFileHandler',
+            'when': 'midnight',
             'formatter': 'main',
             'filename': JUMPSERVER_LOG_FILE,
         },
-        'ansible_logs': {
+        'drf_exception': {
             'encoding': 'utf8',
             'level': 'DEBUG',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'formatter': 'main',
-            'maxBytes': 1024*1024*100,
-            'backupCount': 7,
-            'filename': ANSIBLE_LOG_FILE,
+            'class': 'jumpserver.rewriting.logging.DailyTimedRotatingFileHandler',
+            'when': 'midnight',
+            'formatter': 'exception',
+            'filename': DRF_EXCEPTION_LOG_FILE,
+        },
+        'unexpected_exception': {
+            'encoding': 'utf8',
+            'level': 'DEBUG',
+            'class': 'jumpserver.rewriting.logging.DailyTimedRotatingFileHandler',
+            'when': 'midnight',
+            'formatter': 'exception',
+            'filename': UNEXPECTED_EXCEPTION_LOG_FILE,
         },
         'syslog': {
             'level': 'INFO',
@@ -84,8 +96,12 @@ LOGGING = {
             'handlers': ['console', 'file'],
             'level': LOG_LEVEL,
         },
-        'ops.ansible_api': {
-            'handlers': ['console', 'ansible_logs'],
+        'drf_exception': {
+            'handlers': ['console', 'drf_exception'],
+            'level': LOG_LEVEL,
+        },
+        'unexpected_exception': {
+            'handlers': ['unexpected_exception'],
             'level': LOG_LEVEL,
         },
         'django_auth_ldap': {
@@ -96,14 +112,21 @@ LOGGING = {
             'handlers': ['syslog'],
             'level': 'INFO'
         },
-
+        'azure': {
+            'handlers': ['null'],
+            'level': 'ERROR'
+        },
+        'oauth2_provider': {
+            'handlers': ['console', 'file'],
+            'level': LOG_LEVEL,
+        },
     }
 }
 
-if os.environ.get("DEBUG_DB"):
+if CONFIG.DEBUG_DEV:
     LOGGING['loggers']['django.db'] = {
-       'handlers': ['console', 'file'],
-       'level': 'DEBUG'
+        'handlers': ['console', 'file'],
+        'level': 'DEBUG'
     }
 
 SYSLOG_ENABLE = CONFIG.SYSLOG_ENABLE
@@ -118,4 +141,4 @@ if CONFIG.SYSLOG_ADDR != '' and len(CONFIG.SYSLOG_ADDR.split(':')) == 2:
     })
 
 if not os.path.isdir(LOG_DIR):
-    os.makedirs(LOG_DIR)
+    os.makedirs(LOG_DIR, mode=0o755)

@@ -1,53 +1,58 @@
 # -*- coding: utf-8 -*-
 #
-
 from datetime import datetime
-from jms_storage.es import ESStorage
-from common.utils import get_logger
-from .base import CommandBase
-from .models import AbstractSessionCommand
 
+import pytz
+
+from common.plugins.es import ES
+from common.utils import get_logger
 
 logger = get_logger(__file__)
 
 
-class CommandStore(ESStorage, CommandBase):
-    def __init__(self, params):
-        super().__init__(params)
+class CommandStore(ES):
+    def __init__(self, config):
+        properties = {
+            "session": {
+                "type": "keyword"
+            },
+            "org_id": {
+                "type": "keyword"
+            },
+            "@timestamp": {
+                "type": "date"
+            },
+            "timestamp": {
+                "type": "long"
+            }
+        }
+        exact_fields = {'risk_level'}
+        fuzzy_fields = {'input', 'user', 'asset', 'account'}
+        match_fields = {'input'}
+        keyword_fields = {'session', 'org_id'}
 
-    def filter(self, date_from=None, date_to=None,
-               user=None, asset=None, system_user=None,
-               input=None, session=None, risk_level=None, org_id=None):
+        super().__init__(config, properties, keyword_fields, exact_fields, fuzzy_fields, match_fields)
 
-        if date_from is not None:
-            if isinstance(date_from, float):
-                date_from = datetime.fromtimestamp(date_from)
-        if date_to is not None:
-            if isinstance(date_to, float):
-                date_to = datetime.fromtimestamp(date_to)
+    @staticmethod
+    def make_data(command):
+        data = dict(
+            user=command["user"], asset=command["asset"],
+            account=command["account"], input=command["input"],
+            output=command["output"], risk_level=command["risk_level"],
+            session=command["session"], timestamp=command["timestamp"],
+            org_id=command["org_id"]
+        )
+        data["date"] = datetime.fromtimestamp(command['timestamp'], tz=pytz.UTC)
+        return data
 
-        try:
-            data = super().filter(date_from=date_from, date_to=date_to,
-                                  user=user, asset=asset, system_user=system_user,
-                                  input=input, session=session,
-                                  risk_level=risk_level, org_id=org_id)
-        except Exception as e:
-            logger.error(e, exc_info=True)
-            return []
-        else:
-            return AbstractSessionCommand.from_multi_dict(
-                [item["_source"] for item in data["hits"] if item]
-            )
+    @staticmethod
+    def handler_time_field(data):
+        timestamp__gte = data.get('timestamp__gte')
+        timestamp__lte = data.get('timestamp__lte')
+        timestamp_range = {}
 
-    def count(self, date_from=None, date_to=None, user=None, asset=None,
-              system_user=None, input=None, session=None):
-        try:
-            count = super().count(
-                date_from=date_from, date_to=date_to, user=user, asset=asset,
-                system_user=system_user, input=input, session=session
-            )
-        except Exception as e:
-            logger.error(e, exc_info=True)
-            return 0
-        else:
-            return count
+        if timestamp__gte:
+            timestamp_range['gte'] = timestamp__gte
+        if timestamp__lte:
+            timestamp_range['lte'] = timestamp__lte
+        return 'timestamp', timestamp_range

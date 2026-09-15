@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 #
 from functools import partial
+
 from werkzeug.local import LocalProxy
+
 from common.local import thread_local
 
 
@@ -18,4 +20,3 @@ def get_current_request():
 
 
 current_request = LocalProxy(partial(_find, 'current_request'))
-

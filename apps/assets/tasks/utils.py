@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 #
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
 
 from common.utils import get_logger
-
 
 logger = get_logger(__file__)
 __all__ = [
@@ -25,10 +24,13 @@ def check_asset_can_run_ansible(asset):
 
 
 def check_system_user_can_run_ansible(system_user):
-    if not system_user.is_need_push():
-        msg = _("Push system user task skip, auto push not enable or "
-                "protocol is not ssh or rdp: {}").format(system_user.name)
-        logger.info(msg)
+    if not system_user.auto_push_account:
+        logger.warning(f'Push system user task skip, auto push not enable: system_user={system_user.name}')
+        return False
+    if not system_user.is_protocol_support_push:
+        logger.warning(f'Push system user task skip, protocol not support: '
+                    f'system_user={system_user.name} protocol={system_user.protocol} '
+                    f'support_protocol={system_user.SUPPORT_PUSH_PROTOCOLS}')
         return False
 
     # Push root as system user is dangerous
@@ -37,10 +39,6 @@ def check_system_user_can_run_ansible(system_user):
         logger.info(msg)
         return False
 
-    # if system_user.protocol != "ssh":
-    #     msg = _("System user protocol not ssh: {}".format(system_user))
-    #     logger.info(msg)
-    #     return False
     return True
 
 

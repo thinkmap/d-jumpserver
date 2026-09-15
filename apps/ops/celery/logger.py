@@ -1,12 +1,16 @@
+import os
 from logging import StreamHandler
+from threading import get_ident
 
-from django.conf import settings
 from celery import current_task
 from celery.signals import task_prerun, task_postrun
+from django.conf import settings
 from kombu import Connection, Exchange, Queue, Producer
 from kombu.mixins import ConsumerMixin
 
 from .utils import get_celery_task_log_path
+from ..ansible.utils import get_ansible_task_log_path
+from ..const import CELERY_LOG_MAGIC_MARK
 
 routing_key = 'celery_log'
 celery_log_exchange = Exchange('celery_log_exchange', type='direct')
@@ -103,7 +107,42 @@ class CeleryTaskLoggerHandler(StreamHandler):
     def after_task_publish(self, sender, body, **kwargs):
         pass
 
+    @staticmethod
+    def is_routine_task_success(record):
+        # Celery appends this framework-level acknowledgement after every
+        # task. It only exposes an internal task path and return value, while
+        # task implementations already provide the user-facing result.
+        message = record.getMessage()
+        return (
+            record.name == 'celery.app.trace'
+            and message.startswith('Task ')
+            and ' succeeded in ' in message
+        )
+
+    @staticmethod
+    def is_internal_automation_message(record):
+        message = record.getMessage()
+        return message.startswith((
+            "Acquire Lock('lock:account-change-secret:",
+            "Acquired Lock('lock:account-change-secret:",
+            "Release Lock('lock:account-change-secret:",
+            "Released Lock('lock:account-change-secret:",
+            "Acquire Lock('lock:{accounts:vault-secret-transfer}",
+            "Acquired Lock('lock:{accounts:vault-secret-transfer}",
+            "Release Lock('lock:{accounts:vault-secret-transfer}",
+            "Released Lock('lock:{accounts:vault-secret-transfer}",
+            "Acquire Lock('lock:{account-risk-check:",
+            "Acquired Lock('lock:{account-risk-check:",
+            "Release Lock('lock:{account-risk-check:",
+            "Released Lock('lock:{account-risk-check:",
+        ))
+
     def emit(self, record):
+        if (
+                self.is_routine_task_success(record)
+                or self.is_internal_automation_message(record)
+        ):
+            return
         task_id = self.get_current_task_id()
         if not task_id:
             return
@@ -123,6 +162,42 @@ class CeleryTaskLoggerHandler(StreamHandler):
         pass
 
 
+class CeleryThreadingLoggerHandler(CeleryTaskLoggerHandler):
+    @staticmethod
+    def get_current_thread_id():
+        return str(get_ident())
+
+    def emit(self, record):
+        if self.is_internal_automation_message(record):
+            return
+        thread_id = self.get_current_thread_id()
+        if (
+                self.is_routine_task_success(record)
+                and self.has_task_output(thread_id)
+        ):
+            return
+        try:
+            self.write_thread_task_log(thread_id, record)
+            self.flush()
+        except ValueError:
+            self.handleError(record)
+
+    def has_task_output(self, thread_id):
+        return True
+
+    def write_thread_task_log(self, thread_id, msg):
+        pass
+
+    def handle_task_start(self, task_id):
+        pass
+
+    def handle_task_end(self, task_id):
+        pass
+
+    def handleError(self, record) -> None:
+        pass
+
+
 class CeleryTaskMQLoggerHandler(CeleryTaskLoggerHandler):
     def __init__(self):
         self.producer = CeleryLoggerProducer()
@@ -137,11 +212,16 @@ class CeleryTaskMQLoggerHandler(CeleryTaskLoggerHandler):
 
 
 class CeleryTaskFileHandler(CeleryTaskLoggerHandler):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.f = None
-        super().__init__(stream=None)
+        super().__init__(*args, **kwargs)
 
     def emit(self, record):
+        if (
+                self.is_routine_task_success(record)
+                or self.is_internal_automation_message(record)
+        ):
+            return
         msg = self.format(record)
         if not self.f or self.f.closed:
             return
@@ -158,3 +238,47 @@ class CeleryTaskFileHandler(CeleryTaskLoggerHandler):
 
     def handle_task_end(self, task_id):
         self.f and self.f.close()
+
+
+class CeleryThreadTaskFileHandler(CeleryThreadingLoggerHandler):
+    def __init__(self, *args, **kwargs):
+        self.thread_id_fd_mapper = {}
+        self.task_id_thread_id_mapper = {}
+        super().__init__(*args, **kwargs)
+
+    def write_thread_task_log(self, thread_id, record):
+        f = self.thread_id_fd_mapper.get(thread_id, None)
+        if not f:
+            raise ValueError('Not found thread task file')
+        msg = self.format(record)
+        f.write(msg.encode())
+        f.write(self.terminator.encode())
+        f.flush()
+
+    def has_task_output(self, thread_id):
+        f = self.thread_id_fd_mapper.get(thread_id)
+        return bool(f and f.tell() > 0)
+
+    def flush(self):
+        for f in self.thread_id_fd_mapper.values():
+            f.flush()
+
+    def handle_task_start(self, task_id):
+        log_path = get_celery_task_log_path(task_id)
+        thread_id = self.get_current_thread_id()
+        self.task_id_thread_id_mapper[task_id] = thread_id
+        f = open(log_path, 'ab')
+        self.thread_id_fd_mapper[thread_id] = f
+
+    def handle_task_end(self, task_id):
+        ident_id = self.task_id_thread_id_mapper.get(task_id, '')
+        f = self.thread_id_fd_mapper.pop(ident_id, None)
+        if f and not f.closed:
+            f.write(CELERY_LOG_MAGIC_MARK)
+            f.close()
+        self.task_id_thread_id_mapper.pop(task_id, None)
+
+        ansible_log_path = get_ansible_task_log_path(task_id, create=False)
+        if os.path.isfile(ansible_log_path):
+            with open(ansible_log_path, 'ab') as ansible_log:
+                ansible_log.write(CELERY_LOG_MAGIC_MARK)

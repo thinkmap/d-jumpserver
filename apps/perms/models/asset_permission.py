@@ -1,154 +1,190 @@
-import uuid
 import logging
-from functools import reduce
 
 from django.db import models
 from django.db.models import Q
-from django.utils.translation import ugettext_lazy as _
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
-from orgs.models import Organization
-from orgs.utils import get_current_org
-from assets.models import Asset, SystemUser, Node
+from accounts.const import AliasAccount
+from accounts.models import Account
+from assets.models import Asset
+from common.utils import asset_permission_date_expired_default, lazyproperty
+from common.utils.timezone import local_now
+from labels.mixins import LabeledMixin
+from orgs.mixins.models import JMSOrgBaseModel
+from orgs.mixins.models import OrgManager
+from perms.const import ActionChoices
+from users.models import User
 
-from .base import BasePermission
+__all__ = ['AssetPermission', 'ActionChoices', 'AssetPermissionQuerySet']
+
+# 使用场景
+logger = logging.getLogger('jumpserver.permissions')
 
 
-__all__ = [
-    'AssetPermission', 'Action',
-]
-logger = logging.getLogger(__name__)
+class AssetPermissionQuerySet(models.QuerySet):
+    def active(self):
+        return self.filter(is_active=True)
+
+    def valid(self):
+        return self.active().filter(date_start__lt=timezone.now()) \
+            .filter(date_expired__gt=timezone.now())
+
+    def inactive(self):
+        return self.filter(is_active=False)
+
+    def invalid(self):
+        now = timezone.now()
+        q = (Q(is_active=False) | Q(date_start__gt=now) | Q(date_expired__lt=now))
+        return self.filter(q)
+
+    def filter_by_accounts(self, accounts):
+        q = Q(accounts__contains=list(accounts)) | \
+            Q(accounts__contains=AliasAccount.ALL.value)
+        return self.filter(q)
 
 
-class Action:
-    NONE = 0
-    CONNECT = 0b00000001
-    UPLOAD = 0b00000010
-    DOWNLOAD = 0b00000100
-    UPDOWNLOAD = UPLOAD | DOWNLOAD
-    ALL = 0b11111111
+class AssetPermissionManager(OrgManager):
+    def valid(self):
+        return self.get_queryset().valid()
 
-    DB_CHOICES = (
-        (ALL, _('All')),
-        (CONNECT, _('Connect')),
-        (UPLOAD, _('Upload file')),
-        (DOWNLOAD, _('Download file')),
-        (UPDOWNLOAD, _("Upload download")),
+    def get_expired_permissions(self):
+        now = local_now()
+        return self.get_queryset().filter(Q(date_start__lte=now) | Q(date_expired__gte=now))
+
+
+def default_protocols():
+    return ['all']
+
+
+class AssetPermission(LabeledMixin, JMSOrgBaseModel):
+    name = models.CharField(max_length=128, verbose_name=_('Name'))
+    users = models.ManyToManyField(
+        'users.User', related_name='%(class)ss', blank=True, verbose_name=_("User")
     )
+    user_groups = models.ManyToManyField(
+        'users.UserGroup', related_name='%(class)ss', blank=True, verbose_name=_("User group")
+    )
+    assets = models.ManyToManyField(
+        'assets.Asset', related_name='granted_by_permissions', blank=True, verbose_name=_("Asset")
+    )
+    nodes = models.ManyToManyField(
+        'assets.Node', related_name='granted_by_permissions', blank=True, verbose_name=_("Node")
+    )
+    # 特殊的账号: @ALL, @INPUT @USER 默认包含，将来在全局设置中进行控制.
+    accounts = models.JSONField(default=list, verbose_name=_("Account"))
+    protocols = models.JSONField(default=default_protocols, verbose_name=_("Protocols"))
+    actions = models.IntegerField(default=ActionChoices.connect, verbose_name=_("Actions"))
+    date_start = models.DateTimeField(default=timezone.now, db_index=True, verbose_name=_("Date start"))
+    date_expired = models.DateTimeField(
+        default=asset_permission_date_expired_default, db_index=True, verbose_name=_('Date expired')
+    )
+    is_active = models.BooleanField(default=True, verbose_name=_('Active'))
+    from_ticket = models.BooleanField(default=False, verbose_name=_('From ticket'))
 
-    NAME_MAP = {
-        ALL: "all",
-        CONNECT: "connect",
-        UPLOAD: "upload_file",
-        DOWNLOAD: "download_file",
-        UPDOWNLOAD: "updownload",
-    }
-
-    NAME_MAP_REVERSE = dict({v: k for k, v in NAME_MAP.items()})
-    CHOICES = []
-    for i, j in DB_CHOICES:
-        CHOICES.append((NAME_MAP[i], j))
-
-    @classmethod
-    def value_to_choices(cls, value):
-        value = int(value)
-        choices = [cls.NAME_MAP[i] for i, j in cls.DB_CHOICES if value & i == i]
-        return choices
-
-    @classmethod
-    def choices_to_value(cls, value):
-        if not isinstance(value, list):
-            return cls.NONE
-        db_value = [
-            cls.NAME_MAP_REVERSE[v] for v in value
-            if v in cls.NAME_MAP_REVERSE.keys()
-        ]
-        if not db_value:
-            return cls.NONE
-
-        def to_choices(x, y):
-            return x | y
-
-        result = reduce(to_choices, db_value)
-        return result
-
-    @classmethod
-    def choices(cls):
-        return [(cls.NAME_MAP[i], j) for i, j in cls.DB_CHOICES]
-
-
-class AssetPermission(BasePermission):
-    assets = models.ManyToManyField('assets.Asset', related_name='granted_by_permissions', blank=True, verbose_name=_("Asset"))
-    nodes = models.ManyToManyField('assets.Node', related_name='granted_by_permissions', blank=True, verbose_name=_("Nodes"))
-    system_users = models.ManyToManyField('assets.SystemUser', related_name='granted_by_permissions', verbose_name=_("System user"))
-    actions = models.IntegerField(choices=Action.DB_CHOICES, default=Action.ALL, verbose_name=_("Actions"))
+    objects = AssetPermissionManager.from_queryset(AssetPermissionQuerySet)()
 
     class Meta:
         unique_together = [('org_id', 'name')]
         verbose_name = _("Asset permission")
         ordering = ('name',)
+        permissions = []
 
-    @classmethod
-    def get_queryset_with_prefetch(cls):
-        return cls.objects.all().valid().prefetch_related(
-            models.Prefetch('nodes', queryset=Node.objects.all().only('key')),
-            models.Prefetch('assets', queryset=Asset.objects.all().only('id')),
-            models.Prefetch('system_users', queryset=SystemUser.objects.all().only('id'))
-        ).order_by()
+    def __str__(self):
+        return self.name
 
-    def get_all_assets(self):
+    @property
+    def is_expired(self):
+        if self.date_expired > timezone.now() > self.date_start:
+            return False
+        return True
+
+    @property
+    def is_valid(self):
+        if not self.is_expired and self.is_active:
+            return True
+        return False
+
+    @property
+    def real_accounts(self):
+        return [a for a in self.accounts if not a.startswith('@') or a == '@ALL']
+
+    @real_accounts.setter
+    def real_accounts(self, value):
+        self.accounts += value
+
+    @property
+    def virtual_accounts(self):
+        return [a for a in self.accounts if a.startswith('@') and a != '@ALL']
+
+    @virtual_accounts.setter
+    def virtual_accounts(self, value):
+        self.accounts += value
+
+    @lazyproperty
+    def users_amount(self):
+        return self.users.count()
+
+    @lazyproperty
+    def user_groups_amount(self):
+        return self.user_groups.count()
+
+    @lazyproperty
+    def assets_amount(self):
+        return self.assets.count()
+
+    @lazyproperty
+    def nodes_amount(self):
+        return self.nodes.count()
+
+    def get_all_users(self):
+        from users.models import User
+        user_ids = self.users.all().values_list('id', flat=True)
+        group_ids = self.user_groups.all().values_list('id', flat=True)
+        user_ids = list(user_ids)
+        group_ids = list(group_ids)
+        qs1_ids = User.objects.filter(id__in=user_ids).distinct().values_list('id', flat=True)
+        qs2_ids = User.objects.filter(groups__id__in=group_ids).distinct().values_list('id', flat=True)
+        qs_ids = list(qs1_ids) + list(qs2_ids)
+        qs = User.objects.filter(id__in=qs_ids, is_service_account=False)
+        return qs
+
+    def get_all_assets(self, flat=False):
         from assets.models import Node
         nodes_keys = self.nodes.all().values_list('key', flat=True)
-        assets_ids = set(self.assets.all().values_list('id', flat=True))
-        nodes_assets_ids = Node.get_nodes_all_assets_ids(nodes_keys)
-        assets_ids.update(nodes_assets_ids)
-        assets = Asset.objects.filter(id__in=assets_ids)
+        asset_ids = set(self.assets.all().values_list('id', flat=True))
+        nodes_asset_ids = Node.get_nodes_all_asset_ids_by_keys(nodes_keys)
+        asset_ids.update(nodes_asset_ids)
+        if flat:
+            return asset_ids
+        assets = Asset.objects.filter(id__in=asset_ids)
         return assets
 
+    def get_all_accounts(self, flat=False):
+        """
+         :return: 返回授权的所有账号对象 Account
+        """
+        asset_ids = self.get_all_assets(flat=True)
+        q = Q(asset_id__in=asset_ids)
+        if AliasAccount.ALL not in self.accounts:
+            q &= Q(username__in=self.accounts)
+        accounts = Account.objects.filter(q).order_by('asset__name', 'name', 'username')
+        if not flat:
+            return accounts
+        return accounts.values_list('id', flat=True)
+
     @classmethod
-    def generate_fake(cls, count=100):
-        from ..hands import User, Node, SystemUser
-        import random
-
-        org = get_current_org()
-        if not org or not org.is_real():
-            Organization.default().change_to()
-
-        nodes = list(Node.objects.all())
-        assets = list(Asset.objects.all())
-        system_users = list(SystemUser.objects.all())
-        users = User.objects.filter(username='admin')
-
-        for i in range(count):
-            name = "fake_perm_to_admin_{}".format(str(uuid.uuid4())[:6])
-            perm = cls(name=name)
-            try:
-                perm.save()
-                perm.users.set(users)
-                if system_users and len(system_users) > 3:
-                    _system_users = random.sample(system_users, 3)
-                elif system_users:
-                    _system_users = [system_users[0]]
-                else:
-                    _system_users = []
-                perm.system_users.set(_system_users)
-
-                if nodes and len(nodes) > 3:
-                    _nodes = random.sample(nodes, 3)
-                else:
-                    _nodes = [Node.default_node()]
-                perm.nodes.set(_nodes)
-
-                if assets and len(assets) > 3:
-                    _assets = random.sample(assets, 3)
-                elif assets:
-                    _assets = [assets[0]]
-                else:
-                    _assets = []
-                perm.assets.set(_assets)
-
-                logger.debug('Generate fake perm: %s' % perm.name)
-
-            except Exception as e:
-                print('Error continue')
-                continue
-
+    def get_all_users_for_perms(cls, perm_ids, flat=False):
+        user_ids = cls.users.through.objects \
+            .filter(assetpermission_id__in=perm_ids) \
+            .values_list('user_id', flat=True).distinct()
+        group_ids = cls.user_groups.through.objects \
+            .filter(assetpermission_id__in=perm_ids) \
+            .values_list('usergroup_id', flat=True).distinct()
+        group_user_ids = User.groups.through.objects \
+            .filter(usergroup_id__in=group_ids) \
+            .values_list('user_id', flat=True).distinct()
+        user_ids = set(user_ids) | set(group_user_ids)
+        if flat:
+            return user_ids
+        return User.objects.filter(id__in=user_ids)
